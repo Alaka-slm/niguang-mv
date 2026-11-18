@@ -1,0 +1,11 @@
+# 原曲与成片（成片发布在 GitHub Releases；单文件超过 100 MB 的也无法进仓库）
+逆光.mp4
+逆光_MV.mp4
+render/film.h264
+*.mp4
+*.h264
+
+# 本地环境
+.claude/
+__pycache__/
+*.log

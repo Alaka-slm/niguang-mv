@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>逆光 · 主角设定 · 橘色小螃蟹</title>
+<style>
+  html,body{margin:0;height:100%;background:#222;display:flex;align-items:center;justify-content:center}
+  canvas{max-width:100vw!important;max-height:100vh!important;width:auto!important;height:auto!important}
+  #sheet{display:none}
+</style>
+<script src="../opening/lib/p5.min.js"></script>
+<script src="../opening/lib/p5.brush.js"></script>
+<script src="character.js"></script>
+</head>
+<body>
+<canvas id="sheet" width="1920" height="1080"></canvas>
+<script>
+// 角色设定图：三视图 + 表情表 + 动作表。角色全部经由 Crab.draw() 绘制。
+const CW = 1920, CH = 1080;
+let paperG, step = 0;
+window.done = false;
+
+function setup() {
+  createCanvas(CW, CH, WEBGL); pixelDensity(1);
+  paperG = createGraphics(CW, CH); paperG.pixelDensity(1); paperG.loadPixels();
+  noiseSeed(4); randomSeed(4);
+  for (let y = 0; y < CH; y++) for (let x = 0; x < CW; x++) {
+    const n = noise(x * 0.004, y * 0.004) * 12 + noise(x * 0.08, y * 0.08) * 9 + random(-4, 4), i = (y * CW + x) * 4;
+    paperG.pixels.set([236 + n - 6, 229 + n - 6, 212 + n - 6, 255], i);
+  }
+  paperG.updatePixels();
+  brush.seed(7);
+  noLoop();
+}
+
+const ROW1_Y = 520, ROW2_Y = 975;
+const VIEWS = [
+  { x: 300, facing: 'front' }, { x: 730, facing: 'right' }, { x: 1150, facing: 'back' },
+];
+const EXPR = [
+  { x: 125, expression: 'neutral' }, { x: 360, expression: 'happy' }, { x: 595, expression: 'shy' }, { x: 830, expression: 'sad' },
+];
+const ACTS = [
+  { x: 1075, action: 'hold', prop: 'lantern', expression: 'happy' },
+  { x: 1330, action: 'walk', t: 0.25, facing: 'right' },
+  { x: 1565, action: 'hug', prop: 'star', expression: 'happy' },
+  { x: 1800, action: 'jump', t: 0.5, expression: 'happy' },
+];
+
+function draw() {
+  if (step === 0) {
+    translate(-width / 2, -height / 2);
+    image(paperG, 0, 0);
+    // 分隔线（铅笔）
+    brush.set('HB', '#9a8a7a', 0.6); brush.line(40, 615, 1880, 612); brush.line(965, 650, 962, 1050); brush.line(1350, 70, 1348, 580); brush.noStroke();
+    for (const v of VIEWS) Crab.draw({ x: v.x, y: ROW1_Y, size: 1.45, facing: v.facing, expression: 'neutral', action: 'idle' });
+    // 色板：蜡笔色块
+    const sw = [Crab.PAL.shell, Crab.PAL.shellLight, Crab.PAL.shellDark, Crab.PAL.ink, Crab.PAL.blush, Crab.PAL.eye];
+    sw.forEach((c, i) => {
+      const x = 1420 + (i % 2) * 230, y = 150 + Math.floor(i / 2) * 140;
+      brush.noStroke(); brush.setHatch('cpencil', c, 1); brush.hatch(3, 40, { rand: 0.1, continuous: true }); brush.rect(x, y, 90, 70); brush.noHatch();
+      brush.set('2B', '#5e2614', 0.5); brush.rect(x, y, 90, 70); brush.noStroke();
+    });
+    for (const e of EXPR) Crab.draw({ x: e.x, y: ROW2_Y, size: 0.78, facing: 'front', expression: e.expression, action: 'idle' });
+    for (const a of ACTS) Crab.draw({ x: a.x, y: ROW2_Y, size: 0.72, facing: a.facing || 'front', expression: a.expression || 'neutral', action: a.action, t: a.t || 0, prop: a.prop });
+  } else window.done = true;
+  step++;
+}
+
+// 合成：WEBGL 画面 + 2D 标注
+function compose() {
+  const out = document.getElementById('sheet'), x = out.getContext('2d');
+  x.drawImage(document.querySelector('canvas.p5Canvas') || document.querySelectorAll('canvas')[1], 0, 0);
+  x.fillStyle = '#4a2a1e'; x.textAlign = 'left';
+  x.font = 'bold 40px "Microsoft YaHei","PingFang SC",sans-serif'; x.fillText('橘色小螃蟹 · 角色设定', 48, 70);
+  x.font = '22px "Microsoft YaHei","PingFang SC",sans-serif'; x.fillStyle = '#7a5a48';
+  x.fillText('《逆光》MV 主角 ｜ 蜡笔手绘绘本风 ｜ 全部由 character.js 绘制', 50, 106);
+  x.textAlign = 'center'; x.fillStyle = '#4a2a1e'; x.font = 'bold 28px "Microsoft YaHei","PingFang SC",sans-serif';
+  [['正面', 300], ['侧面', 730], ['背面', 1150]].forEach(([t, cx]) => x.fillText(t, cx, 578));
+  x.textAlign = 'left'; x.fillText('色板', 1420, 120);
+  x.font = '20px "Microsoft YaHei","PingFang SC",sans-serif'; x.fillStyle = '#7a5a48';
+  ['壳 #f08a3a', '高光 #ffbb73', '暗部 #c9592a', '描边 #5e2614', '腮红 #f27a8a', '眼白 #fffaf0'].forEach((t, i) => x.fillText(t, 1420 + (i % 2) * 230, 245 + Math.floor(i / 2) * 140));
+  x.fillStyle = '#4a2a1e'; x.font = 'bold 28px "Microsoft YaHei","PingFang SC",sans-serif';
+  x.fillText('表情', 48, 660); x.fillText('动作', 990, 660);
+  x.textAlign = 'center'; x.font = '22px "Microsoft YaHei","PingFang SC",sans-serif';
+  [['平静', 125], ['开心', 360], ['害羞', 595], ['难过', 830]].forEach(([t, cx]) => x.fillText(t, cx, 1030));
+  [['手持道具·提灯', 1075], ['走（侧行）', 1330], ['拥抱', 1565], ['跳', 1800]].forEach(([t, cx]) => x.fillText(t, cx, 1030));
+  return out;
+}
+
+window.exportPNG = async (name = 'character/crab_sheet.png') => {
+  while (!window.done) { redraw(); await new Promise(r => setTimeout(r, 50)); }
+  const out = compose();
+  const blob = await new Promise(r => out.toBlob(r, 'image/png'));
+  const res = await fetch('/save?name=' + name, { method: 'POST', body: blob });
+  return await res.text();
+};
+</script>
+</body>
+</html>

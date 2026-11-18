@@ -1,0 +1,382 @@
+/*
+ * character.js — 《逆光》MV 主角：橘色小螃蟹（蜡笔手绘风，p5.js + p5.brush 1.1.x）
+ *
+ * 后续所有镜头都只通过本模块绘制角色，保证造型一致。不要在镜头里另画螃蟹。
+ *
+ * 用法（在 WEBGL 画布的 draw() 中，已执行 translate(-width/2, -height/2) 之后）:
+ *   Crab.draw({ x, y, size, facing, expression, action, t, prop, holdSide, shadow })
+ *     x, y        角色脚底中心的画布坐标（站立时脚踩在 y 上）
+ *     size        缩放，1 ≈ 高 175px、宽 250px（含双螯）
+ *     facing      'front' | 'left' | 'right' | 'back'
+ *     expression  'neutral' | 'happy' | 'shy' | 'sad'          （背面看不到脸，会忽略）
+ *     action      'idle' | 'walk' | 'jump' | 'hug' | 'hold'
+ *     t           动作相位 0–1（walk 为步态循环；jump 为起跳→落地；其他动作可做轻微呼吸）
+ *     prop        道具名，action 为 'hold' / 'hug' 时生效：'lantern' | 'flower' | 'letter' | 'star'
+ *     holdSide    'near' | 'far'（正/背面时 near = 画面右侧那只螯）。默认 'near'
+ *     shadow      是否画地面投影，默认 true
+ *   Crab.registerProp(name, { radius, center:[x,y], draw(api) })   注册新道具（见文末）
+ *
+ * 两条硬约束（由模块保证，镜头里无需处理）：
+ *   1) 道具与螯不分离：道具原点 = 螯尖夹口；绘制顺序为 下钳 → 道具 → 上钳，上钳压住道具握柄。
+ *   2) 道具不遮脸：绘制前检测道具外接圆与“脸部区域”（眼睛 + 嘴）是否相交，相交则沿远离脸的方向把手臂外伸。
+ */
+(function (root) {
+  'use strict';
+
+  const PAL = {
+    shell: '#f08a3a',      // 橘色壳
+    shellLight: '#ffbb73', // 壳上高光斑
+    shellDark: '#c9592a',  // 腹面 / 腿 / 螯的暗部
+    ink: '#5e2614',        // 描边
+    eye: '#fffaf0',
+    pupil: '#24171c',
+    blush: '#f27a8a',
+    mouth: '#8e2f2a',
+    tear: '#8cc4e8',
+    shadow: '#9c8a86',
+  };
+
+  // ───────── 坐标：局部坐标（x 向右=角色朝向前方/画面右，y 向下，原点=脚底中心）→ 画布坐标 ─────────
+  let S = 1, OX = 0, OY = 0, DIR = 1;
+  const W = (x, y) => [OX + x * S * DIR, OY + y * S];
+  const WP = pts => pts.map(p => W(p[0], p[1]));
+  const D2R = Math.PI / 180;
+  const ang = deg => (DIR === 1 ? deg : 180 - deg);   // 镜像时的排线角度
+  function ell(cx, cy, rx, ry, n = 28, rot = 0) {
+    const c = Math.cos(rot), s = Math.sin(rot), out = [];
+    for (let i = 0; i < n; i++) { const a = i / n * Math.PI * 2, x = Math.cos(a) * rx, y = Math.sin(a) * ry; out.push([cx + x * c - y * s, cy + x * s + y * c]); }
+    return out;
+  }
+
+  // ───────── 蜡笔笔刷原语 ─────────
+  function fill(pts, col, { dist = 3, angle = 45, cross = null, kind = 'cpencil', w = 0.8 } = {}) {
+    brush.noStroke(); brush.noFill();
+    brush.setHatch(kind, col, w * S);
+    const d = Math.max(1.4, dist * S);
+    brush.hatch(d, ang(angle), { rand: 0.08, continuous: true, gradient: 0 });
+    brush.polygon(WP(pts));
+    if (cross !== null) { brush.hatch(d * 1.25, ang(cross), { rand: 0.08, continuous: true, gradient: 0 }); brush.polygon(WP(pts)); }
+    brush.noHatch();
+  }
+  function outline(pts, col = PAL.ink, w = 0.9, kind = '2B', closed = true) {
+    brush.noHatch(); brush.noFill(); brush.set(kind, col, w * S);
+    const P = WP(pts), n = closed ? P.length : P.length - 1;
+    for (let i = 0; i < n; i++) { const a = P[i], b = P[(i + 1) % P.length]; brush.line(a[0], a[1], b[0], b[1]); }
+    brush.noStroke();
+  }
+  function stroke(pts, col, w = 1, kind = 'charcoal') { outline(pts, col, w, kind, false); }
+  function curve(pts, col = PAL.ink, w = 0.9, kind = '2B') {
+    brush.noHatch(); brush.set(kind, col, w * S); brush.spline(WP(pts), 0.5); brush.noStroke();
+  }
+
+  // ───────── 道具注册表（道具局部坐标：原点=螯尖夹口，+x=远离身体，-y=向上）─────────
+  const PROPS = {};
+  function registerProp(name, def) { PROPS[name] = def; }
+  function propApi(gx, gy, out) {   // 把道具局部坐标映射到角色局部坐标，再到画布
+    const T = ([x, y]) => [gx + x * out, gy + y];
+    return {
+      T, PAL, S,
+      fill: (pts, col, o) => fill(pts.map(T), col, o),
+      outline: (pts, col, w, kind, closed) => outline(pts.map(T), col, w, kind, closed),
+      stroke: (pts, col, w, kind) => stroke(pts.map(T), col, w, kind),
+      curve: (pts, col, w, kind) => curve(pts.map(T), col, w, kind),
+      ell,
+    };
+  }
+  registerProp('lantern', {   // 小提灯：杆尾夹在钳口里（被上钳压住），灯笼紧挨钳口垂下（呼应“光”）
+    radius: 26, center: [24, 8],
+    draw(p) {
+      const stick = [[-16, 2], [26, -26], [29, -22], [-13, 6]];
+      p.fill(stick, '#7a5232', { dist: 1.4, angle: 50 }); p.outline(stick, PAL.ink, 0.5);
+      p.stroke([[27, -24], [26, -12]], PAL.ink, 0.45, '2B');
+      const body = ell(26, 8, 13, 17, 22);
+      p.fill(body, '#ffd36e', { dist: 1.8, angle: 80, cross: 170 });
+      p.fill(ell(26, 8, 6, 9, 14), '#fff2c4', { dist: 1.4, angle: 30 });
+      p.outline(body, '#a2531f', 0.7);
+      p.fill([[18, -12], [34, -12], [32, -9], [20, -9]], PAL.ink, { dist: 1.2, angle: 0 });
+      p.fill([[18, 25], [34, 25], [32, 28], [20, 28]], PAL.ink, { dist: 1.2, angle: 0 });
+    },
+  });
+  registerProp('flower', {
+    radius: 26, center: [30, -34],
+    draw(p) {
+      { const st = [[-16, 4], [29, -31], [31, -28], [-13, 8]]; p.fill(st, '#4f8a4a', { dist: 1.3, angle: 50 }); p.outline(st, '#2f5a2a', 0.45); }
+      p.fill(ell(14, -12, 9, 4, 12, -0.7), '#6aa25c', { dist: 1.8, angle: 40 });
+      for (let i = 0; i < 5; i++) { const a = i / 5 * Math.PI * 2; p.fill(ell(30 + Math.cos(a) * 10, -34 + Math.sin(a) * 10, 8, 8, 14), '#ffd86b', { dist: 1.8, angle: 60 + i * 30 }); }
+      p.fill(ell(30, -34, 6, 6, 12), '#e0782f', { dist: 1.6, angle: 20 });
+    },
+  });
+  registerProp('letter', {
+    radius: 26, center: [16, -9],
+    draw(p) {
+      const env = [[-10, -24], [40, -30], [42, 8], [-8, 12]];
+      p.fill(env, '#f6efe0', { dist: 2.2, angle: 10 });
+      p.outline(env, PAL.ink, 0.7);
+      p.stroke([[-10, -24], [16, -4], [40, -30]], PAL.ink, 0.5, '2B');
+      p.fill(ell(16, -4, 5, 5, 10), '#d8584a', { dist: 1.5, angle: 45 });
+    },
+  });
+  registerProp('star', {      // 拥抱用的小星星抱枕
+    radius: 24, center: [0, 0],
+    draw(p) {
+      const st = []; for (let i = 0; i < 10; i++) { const a = -Math.PI / 2 + i * Math.PI / 5, r = i % 2 ? 11 : 25; st.push([Math.cos(a) * r, Math.sin(a) * r + 2]); }
+      p.fill(st, '#ffd36e', { dist: 2, angle: 70, cross: 160 });
+      p.outline(st, '#a2531f', 0.7);
+    },
+  });
+
+  // ───────── 螯：掌 + 下钳 + 上钳；返回夹口位置 ─────────
+  function finger(c, a, len, wid) {
+    const ux = Math.cos(a), uy = Math.sin(a), px = -uy, py = ux;
+    const b = [c[0] + ux * 14, c[1] + uy * 14];
+    return [[b[0] + px * wid, b[1] + py * wid], [b[0] + ux * len * 0.55 + px * wid * 0.9, b[1] + uy * len * 0.55 + py * wid * 0.9],
+            [b[0] + ux * len, b[1] + uy * len], [b[0] + ux * len * 0.5 - px * wid * 0.5, b[1] + uy * len * 0.5 - py * wid * 0.5], [b[0] - px * wid * 0.6, b[1] - py * wid * 0.6]];
+  }
+  function claw(arm, dark, drawPropFn) {
+    const { clawC: c, clawAng: aDeg, open } = arm, a = aDeg * D2R;
+    const col = dark ? PAL.shellDark : PAL.shell, edge = dark ? '#7a3318' : PAL.ink;
+    const up = finger(c, a - open / 2, 34, 10), lo = finger(c, a + open / 2, 28, 8);
+    // 上钳朝外侧（远离身体中线）以免与下钳穿插
+    fill(lo, dark ? '#a84a24' : PAL.shellDark, { dist: 2.2, angle: aDeg + 60 }); outline(lo, edge, 0.75);
+    const palm = ell(c[0], c[1], 22, 18, 22, a);
+    fill(palm, col, { dist: 2.4, angle: aDeg + 50, cross: aDeg + 140 }); outline(palm, edge, 0.8);
+    const grip = [c[0] + Math.cos(a) * 40, c[1] + Math.sin(a) * 40];
+    if (drawPropFn) drawPropFn(grip);
+    fill(up, col, { dist: 2.2, angle: aDeg + 70 }); outline(up, edge, 0.8);
+    if (!dark) fill(ell(c[0] - Math.cos(a) * 4 - Math.sin(a) * 7, c[1] - Math.sin(a) * 4 + Math.cos(a) * 7, 7, 4, 12, a), PAL.shellLight, { dist: 1.6, angle: aDeg });
+    return grip;
+  }
+  function armLine(arm, dark) {
+    const col = dark ? '#a84a24' : PAL.shellDark;
+    stroke([arm.shoulder, arm.elbow, arm.clawC], col, 1.5, 'cpencil');
+    stroke([arm.shoulder, arm.elbow, arm.clawC], dark ? '#7a3318' : PAL.ink, 0.35, '2B');
+    fill(ell(arm.elbow[0], arm.elbow[1], 7, 7, 12), col, { dist: 1.6, angle: 30 });
+  }
+  function leg(l) {
+    const col = l.far ? '#a84a24' : PAL.shellDark;
+    stroke([l.hip, l.knee, l.foot], col, 1.3, 'cpencil');
+    stroke([l.hip, l.knee, l.foot], l.far ? '#7a3318' : PAL.ink, 0.3, '2B');
+    stroke([l.knee, [l.knee[0] + (l.foot[0] - l.knee[0]) * 0.15, l.knee[1] - 3]], PAL.ink, 0.4, '2B');
+  }
+
+  // ───────── 姿态：根据朝向/动作/表情求出各部件位置（全部在局部坐标）─────────
+  function pose(o) {
+    const { facing, action, expression } = o, t = ((o.t % 1) + 1) % 1;
+    const side = facing === 'left' || facing === 'right';
+    const jumpH = action === 'jump' ? Math.sin(Math.PI * t) * 70 : 0;
+    const bob = action === 'walk' ? Math.abs(Math.sin(t * Math.PI * 2)) * 4 : action === 'idle' ? Math.sin(t * Math.PI * 2) * 1.5 : 0;
+    const sadDrop = expression === 'sad' && facing !== 'back' ? 4 : 0;
+    const by = -82 - bob - jumpH + sadDrop + (action === 'jump' && t > 0.85 ? 5 : 0);   // 身体中心 y
+    const P = { side, by, jumpH, rx: side ? 60 : 76, ry: 50, legs: [], arms: [] };
+    const lift = (phase) => action === 'walk' ? Math.max(0, Math.sin(t * Math.PI * 2 + phase)) * 14 : 0;
+
+    // 腿
+    if (!side) {
+      for (const sg of [-1, 1]) for (let i = 0; i < 3; i++) {
+        const L = lift(i * 2.1 + (sg > 0 ? Math.PI : 0));
+        const hip = [sg * (44 + i * 13), by + 24 - i * 4];
+        let knee = [sg * (84 + i * 14), by + 8 - i * 2 - L], foot = [sg * (94 + i * 17), -L];
+        if (action === 'jump') { knee = [sg * (80 + i * 12), by + 26]; foot = [sg * (86 + i * 14), by + 70 + i * 3]; }
+        P.legs.push({ hip, knee, foot, far: false });
+      }
+    } else {
+      for (const far of [true, false]) for (let i = 0; i < 3; i++) {
+        const hx = -26 + i * 24 + (far ? -8 : 6), L = lift(i * 2.1 + (far ? Math.PI : 0));
+        const hip = [hx, by + 40];                                            // 从腹底伸出，膝盖在身体轮廓之外
+        let knee = [hx * 1.9 + (far ? -6 : 6), by + 40 - L], foot = [hx * 2.3 + (far ? -10 : 10), -L];
+        if (action === 'jump') { knee = [hx * 1.5, by + 34]; foot = [hx * 1.8, by + 74]; }
+        P.legs.push({ hip, knee, foot, far });
+      }
+    }
+
+    // 手臂（near = 画面右侧 / 侧面时离镜头近的那只）
+    const mkArm = (sg, far) => {
+      let shoulder, elbow, clawC, clawAng, open = 0.55;
+      if (!side) {
+        shoulder = [sg * 60, by - 14]; elbow = [sg * 98, by - 32]; clawC = [sg * 110, by - 66]; clawAng = sg > 0 ? -75 : -105;
+        if (action === 'walk') clawC = [clawC[0], clawC[1] + Math.sin(t * Math.PI * 2) * 5 * sg];
+        if (action === 'jump') { elbow = [sg * 94, by - 54]; clawC = [sg * 98, by - 100]; clawAng = sg > 0 ? -80 : -100; open = 0.8; }
+        if (action === 'hug') { elbow = [sg * 96, by + 4]; clawC = [sg * 34, by + 30]; clawAng = sg > 0 ? 200 : -20; open = 0.35; }
+        if (action === 'idle' && expression === 'shy' && facing !== 'back') { elbow = [sg * 84, by + 12]; clawC = [sg * 30, by + 34]; clawAng = sg > 0 ? 235 : -55; open = 0.2; }
+        if (action === 'idle' && expression === 'sad' && facing !== 'back') { elbow = [sg * 96, by + 8]; clawC = [sg * 104, by + 40]; clawAng = sg > 0 ? 80 : 100; open = 0.3; }
+      } else {
+        const k = far ? 1 : 0;
+        shoulder = [34 - k * 8, by + 14 - k * 6]; elbow = [74 - k * 10, by + 6 - k * 10]; clawC = [104 - k * 12, by - 22 - k * 12]; clawAng = -32 - k * 10;
+        if (action === 'walk') clawC = [clawC[0] + Math.sin(t * Math.PI * 2 + k * Math.PI) * 4, clawC[1]];
+        if (action === 'jump') { elbow = [82 - k * 10, by - 20 - k * 6]; clawC = [116 - k * 12, by - 54 - k * 6]; clawAng = -40; open = 0.8; }   // 向前上方张开，避开眼睛
+        if (action === 'hug') { elbow = [74 - k * 6, by - 4 - k * 10]; clawC = [96 - k * 8, by + 16 - k * 12]; clawAng = 115; open = 0.35; }
+        if (action === 'idle' && expression === 'shy') { elbow = [58 - k * 6, by + 8 - k * 8]; clawC = [74 - k * 8, by + 26 - k * 10]; clawAng = 160; open = 0.2; }
+        if (action === 'idle' && expression === 'sad') { elbow = [62 - k * 6, by + 6 - k * 6]; clawC = [76 - k * 6, by + 40 - k * 6]; clawAng = 95; open = 0.3; }
+      }
+      return { shoulder, elbow, clawC, clawAng, open, far, sg, holds: false };
+    };
+    P.arms = side ? [mkArm(1, true), mkArm(1, false)] : [mkArm(-1, false), mkArm(1, false)];
+
+    // 持道具：握持手臂水平外伸、夹口收紧
+    if (action === 'hold') {
+      const want = o.holdSide === 'far' ? 0 : P.arms.length - 1;
+      const a = P.arms[want]; a.holds = true; a.open = 0.22;
+      if (!side) { a.elbow = [a.sg * 100, by - 10]; a.clawC = [a.sg * 120, by - 24]; a.clawAng = a.sg > 0 ? 0 : 180; }
+      else { a.elbow = [68 - (a.far ? 10 : 0), by - 10 - (a.far ? 10 : 0)]; a.clawC = [100 - (a.far ? 10 : 0), by - 20 - (a.far ? 10 : 0)]; a.clawAng = 0; }
+    }
+
+    // 眼睛
+    const sadEye = expression === 'sad' && facing !== 'back';
+    if (!side) P.eyes = [-1, 1].map(sg => ({ base: [sg * 22, by - 40], c: [sg * (sadEye ? 36 : 28), by - (sadEye ? 70 : 80)], r: 16, sg }));
+    else P.eyes = [{ base: [16, by - 38], c: [20, by - (sadEye ? 72 : 82)], r: 15, far: true }, { base: [32, by - 38], c: [40, by - (sadEye ? 70 : 80)], r: 16, far: false }];
+    P.mouth = side ? [56, by - 8] : [0, by - 14];
+    // 脸部区域（用于道具避让）
+    P.face = side ? [{ c: [30, by - 80], r: 34 }, { c: [52, by - 8], r: 14 }] : [{ c: [0, by - 78], r: 52 }, { c: [0, by - 14], r: 16 }];
+    return P;
+  }
+
+  // ───────── 脸 ─────────
+  function drawEye(e, expr, side, back) {
+    const [cx, cy] = e.c, r = e.r;
+    { const [bx, by2] = e.base, tx = cx, ty = cy + r * 0.8, w0 = 5, w1 = 4;   // 眼柄：一根实心小管
+      const stalk = [[bx - w0, by2], [tx - w1, ty], [tx + w1, ty], [bx + w0, by2]];
+      fill(stalk, e.far ? '#a84a24' : PAL.shellDark, { dist: 1.5, angle: 80 }); outline(stalk, PAL.ink, 0.5); }
+    const ball = ell(cx, cy, r, r * 1.05, 24);
+    if (back) {   // 背面：只看到眼球后侧，涂成浅橘
+      fill(ball, PAL.shellLight, { dist: 2, angle: 60 }); outline(ball, PAL.ink, 0.8); return;
+    }
+    fill(ball, PAL.eye, { dist: 2, angle: 60 });
+    if (expr === 'happy') {   // 眯眼笑：向上弯的弧
+      curve([[cx - r * 0.6, cy + r * 0.2], [cx, cy - r * 0.45], [cx + r * 0.6, cy + r * 0.2]], PAL.pupil, 1.0, '2B');
+    } else {
+      let lx = side ? 0.35 : 0, ly = 0.15;
+      if (expr === 'shy') { lx = side ? 0.2 : -0.35 * (e.sg || 1) * 0 - 0.3; ly = 0.45; }
+      if (expr === 'sad') { ly = 0.45; }
+      const pr = r * 0.48, pc = [cx + lx * r * 0.5, cy + ly * r * 0.5];
+      fill(ell(pc[0], pc[1], pr, pr * 1.08, 16), PAL.pupil, { dist: 1.2, angle: 45, cross: 135 });
+      fill(ell(pc[0] - pr * 0.35, pc[1] - pr * 0.4, pr * 0.28, pr * 0.28, 10), PAL.eye, { dist: 1, angle: 45 });
+      if (expr === 'shy' || expr === 'sad') {   // 上眼皮
+        const tilt = expr === 'sad' ? (side ? 0.25 : 0.3 * (e.sg || 1)) : 0;
+        const y0 = cy - r * (expr === 'sad' ? 0.15 : 0.35);
+        const lid = [[cx - r * 1.05, cy - r * 1.1], [cx + r * 1.05, cy - r * 1.1], [cx + r * 1.02, y0 + r * tilt], [cx - r * 1.02, y0 - r * tilt]];
+        fill(lid, PAL.shell, { dist: 1.6, angle: 10 });
+        stroke([[cx - r, y0 - r * tilt], [cx + r, y0 + r * tilt]], PAL.ink, 0.8, '2B');
+      }
+    }
+    outline(ball, PAL.ink, 0.85);
+  }
+  function drawMouth(P, expr, side) {
+    const [mx, my] = P.mouth, k = side ? 0.85 : 1, mw = side ? 1.15 : 1;
+    if (expr === 'happy') {
+      const m = [[mx - 14 * k, my - 3], [mx + 14 * k, my - 3], [mx + 10 * k, my + 7], [mx, my + 11], [mx - 10 * k, my + 7]];
+      fill(m, PAL.mouth, { dist: 1.6, angle: 30 }); fill(ell(mx, my + 6, 6 * k, 3.5, 10), PAL.blush, { dist: 1.4, angle: 0 }); outline(m, PAL.ink, 0.8);
+    } else if (expr === 'sad') {
+      curve([[mx - 10 * k, my + 5], [mx, my - 2], [mx + 10 * k, my + 5]], PAL.ink, 0.9 * mw);
+    } else if (expr === 'shy') {
+      curve([[mx - 8 * k, my + 1], [mx - 3 * k, my - 2], [mx + 2 * k, my + 2], [mx + 7 * k, my - 1]], PAL.ink, 0.8 * mw);
+    } else {
+      curve([[mx - 9 * k, my], [mx, my + 5], [mx + 9 * k, my]], PAL.ink, 0.85 * mw);
+    }
+  }
+  function drawCheeks(P, expr, side) {
+    if (expr === 'sad') return;
+    const big = expr === 'shy', rx = big ? 13 : 8, ry = big ? 7 : 4.5;
+    const spots = side ? [[46, P.by - 18]] : [[-38, P.by - 20], [38, P.by - 20]];
+    for (const [x, y] of spots) {
+      fill(ell(x, y, rx, ry, 14), PAL.blush, { dist: 1.6, angle: 20 });
+      if (big) for (let i = -1; i <= 1; i++) stroke([[x + i * 7 - 3, y + 3], [x + i * 7 + 3, y - 3]], '#d4546a', 0.45, '2B');
+    }
+  }
+  function drawTear(P, side) {
+    const e = side ? P.eyes[1] : P.eyes[1];
+    const x = e.c[0] + e.r * 0.6, y = e.c[1] + e.r * 1.35;
+    const drop = [[x, y - 7], [x + 5, y + 2], [x + 3, y + 7], [x - 3, y + 7], [x - 5, y + 2]];
+    fill(drop, PAL.tear, { dist: 1.3, angle: 70 }); outline(drop, '#4e7fa5', 0.55);
+  }
+
+  // ───────── 身体 ─────────
+  function drawBody(P, back) {
+    const body = ell(0, P.by, P.rx, P.ry, 36);
+    fill(body, PAL.shell, { dist: 2.6, angle: 35, cross: 125, w: 0.9 });
+    const belly = [];   // 腹面暗部：下缘一条月牙
+    for (let i = 0; i <= 18; i++) { const a = Math.PI * (i / 18); belly.push([Math.cos(a) * P.rx * 0.98, P.by + Math.sin(a) * P.ry * 0.98]); }
+    for (let i = 18; i >= 0; i--) { const a = Math.PI * (i / 18); belly.push([Math.cos(a) * P.rx * 0.9, P.by + 14 + Math.sin(a) * P.ry * 0.62]); }
+    fill(belly, PAL.shellDark, { dist: 2, angle: 10 });
+    if (back) {   // 背壳：两道弧形纹 + 三个斑点
+      curve([[-P.rx * 0.7, P.by - 6], [0, P.by - 26], [P.rx * 0.7, P.by - 6]], PAL.shellDark, 0.9, '2B');
+      curve([[-P.rx * 0.5, P.by + 14], [0, P.by - 2], [P.rx * 0.5, P.by + 14]], PAL.shellDark, 0.8, '2B');
+      for (const [x, y] of [[-30, P.by - 26], [0, P.by - 36], [30, P.by - 26], [-14, P.by + 2], [16, P.by + 4]]) fill(ell(x, y, 7, 5, 12), PAL.shellLight, { dist: 1.5, angle: 30 });
+    } else {
+      for (const [x, y] of (P.side ? [[-24, P.by - 28], [4, P.by - 36]] : [[-34, P.by - 30], [0, P.by - 38], [34, P.by - 30]])) fill(ell(x, y, 9, 6, 12), PAL.shellLight, { dist: 1.6, angle: 30 });
+    }
+    outline(body, PAL.ink, 0.95);
+  }
+
+  // ───────── 道具避让：让道具外接圆离开脸部区域 ─────────
+  function placeProp(P, arm, def) {
+    const out = arm.clawAng > 90 || arm.clawAng < -90 ? -1 : 1;   // 道具 +x 方向朝螯尖外侧
+    for (let k = 0; k < 12; k++) {
+      const a = arm.clawAng * D2R, grip = [arm.clawC[0] + Math.cos(a) * 40, arm.clawC[1] + Math.sin(a) * 40];
+      const pc = [grip[0] + def.center[0] * out, grip[1] + def.center[1]];
+      const hit = P.face.find(f => Math.hypot(pc[0] - f.c[0], pc[1] - f.c[1]) < f.r + def.radius);
+      if (!hit) return out;
+      const dx = pc[0] - hit.c[0], dy = pc[1] - hit.c[1], L = Math.hypot(dx, dy) || 1;   // 沿远离脸的方向外伸手臂
+      arm.clawC = [arm.clawC[0] + dx / L * 8, arm.clawC[1] + dy / L * 8];
+      arm.elbow = [arm.elbow[0] + dx / L * 4, arm.elbow[1] + dy / L * 4];
+    }
+    return out;
+  }
+
+  // ───────── 主入口 ─────────
+  function draw(opts = {}) {
+    const o = Object.assign({ x: 0, y: 0, size: 1, facing: 'front', expression: 'neutral', action: 'idle', t: 0, prop: null, holdSide: 'near', shadow: true }, opts);
+    S = o.size; OX = o.x; OY = o.y; DIR = o.facing === 'left' ? -1 : 1;
+    const back = o.facing === 'back', P = pose(o), expr = back ? 'neutral' : o.expression;
+    const def = o.prop ? PROPS[o.prop] : null;
+    if (o.prop && !def) throw new Error('Crab: 未注册的道具 ' + o.prop);
+
+    if (o.shadow) { const sh = Math.max(0.45, 1 - P.jumpH / 140); fill(ell(0, 2, 92 * sh, 9 * sh, 20), PAL.shadow, { dist: 2.2, angle: 8, w: 0.6 }); }
+
+    // 握持/拥抱的道具绘制函数（在螯内部调用，保证压在下钳之上、上钳之下）
+    let propFor = null;
+    if (def && o.action === 'hold') {
+      const arm = P.arms.find(a => a.holds), out = placeProp(P, arm, def);
+      propFor = { arm, fn: grip => def.draw(propApi(grip[0], grip[1], out)) };
+    }
+
+    const drawArm = (arm) => { armLine(arm, arm.far); claw(arm, arm.far, propFor && propFor.arm === arm ? propFor.fn : null); };
+
+    if (P.side) {
+      P.legs.filter(l => l.far).forEach(leg);
+      P.arms.filter(a => a.far).forEach(drawArm);
+      drawEye(P.eyes[0], expr, true, false);
+      drawBody(P, false);
+      P.legs.filter(l => !l.far).forEach(leg);
+      drawEye(P.eyes[1], expr, true, false);
+      drawCheeks(P, expr, true); drawMouth(P, expr, true);
+      if (expr === 'sad') drawTear(P, true);
+      if (def && o.action === 'hug') def.draw(propApi(P.arms[1].clawC[0] + 6, P.arms[1].clawC[1] - 16, 1));
+      P.arms.filter(a => !a.far).forEach(drawArm);
+    } else {
+      P.legs.forEach(leg);
+      if (back) P.arms.forEach(drawArm);          // 背面：螯在身体另一侧，先画
+      drawBody(P, back);
+      P.eyes.forEach(e => drawEye(e, expr, false, back));
+      if (!back) {
+        drawCheeks(P, expr, false); drawMouth(P, expr, false);
+        if (expr === 'sad') drawTear(P, false);
+        if (def && o.action === 'hug') {   // 抱在胸前（脸下方），双螯随后压上来
+          const c = [0, P.by + 34];
+          if (P.face.some(f => Math.hypot(c[0] - f.c[0], c[1] - f.c[1]) < f.r + def.radius - def.center[1])) c[1] += 8;
+          def.draw(propApi(c[0] - def.center[0], c[1] - def.center[1], 1));
+        }
+        P.arms.forEach(drawArm);
+      }
+    }
+  }
+
+  const Crab = {
+    draw, registerProp, PAL,
+    FACINGS: ['front', 'left', 'right', 'back'],
+    EXPRESSIONS: ['neutral', 'happy', 'shy', 'sad'],
+    ACTIONS: ['idle', 'walk', 'jump', 'hug', 'hold'],
+    get PROPS() { return Object.keys(PROPS); },
+  };
+  root.Crab = Crab;
+  if (typeof module !== 'undefined' && module.exports) module.exports = Crab;
+})(typeof window !== 'undefined' ? window : globalThis);

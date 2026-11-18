@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>逆光 · MV 渲染器</title>
+<style>html,body{margin:0;background:#111;color:#ccc;font:14px sans-serif}#out{width:960px;height:540px;display:block}main canvas.p5Canvas{display:none}</style>
+<script src="../opening/lib/p5.min.js"></script>
+<script src="../opening/lib/p5.brush.js"></script>
+<script src="../character/character.js"></script>
+<script src="scenes.js"></script>
+</head>
+<body>
+<canvas id="out" width="1920" height="1080"></canvas>
+<div id="log"></div>
+<script>
+/*
+ * 渲染引擎：时间 t → 一帧（确定性，可任意定位）
+ * 1) 作画：每秒 12 张（线条随张数“沸腾”抖动）。每张作画在同一块 WEBGL 画布上，
+ *    按该时刻的镜头视角统一绘制背景、角色与道具（背景静止笔触在视角变化不大时复用同一视角下画好的笔触，视角变化超出阈值即重画）。
+ * 2) 合成：输出 30 fps；镜头推拉对整张作画做亚帧插值，背景与角色严格同步运动。
+ * 3) 转场：前景扫过（画中物件，蜡笔质感）/ 甩镜；切换发生在遮挡最满处（T − ½ 拍）。
+ * 4) 歌词：读取 ../lyrics.srt，置于最上层、画面下方，不随镜头运动。
+ */
+const FPS = 30, DFPS = 12;
+let TL = null, SRT = [], paperG, toothG, REQ = null;
+const $out = document.getElementById('out'), OCTX = $out.getContext('2d');
+const log = s => document.getElementById('log').textContent = s;
+
+// ───────── 时间线 ─────────
+const SHOT_IDX = {};
+function shotById(id) { return TL.shots[SHOT_IDX[id]]; }
+function uOf(id, t) { const s = shotById(id); return Math.max(0, Math.min(1, (t - s.start) / (s.end - s.start))); }
+function stateAt(t) {
+  for (const X of TL.transitions) if (t >= X.w0 && t < X.T) { const p = (t - X.w0) / (X.T - X.w0); return X.kind === 'whip' ? { mode: 'whip', X, p } : { mode: 'wipe', X, p, shot: p < 0.5 ? X.out : X.inn }; }
+  const s = TL.shots.find(s => t >= s.start && t < s.end) || TL.shots[TL.shots.length - 1];
+  return { mode: 'single', shot: s.id };
+}
+function camAt(id, u) {
+  const keys = SHOTS[id].cam; let i = 0; while (i < keys.length - 2 && u > keys[i + 1][0]) i++;
+  const a = keys[i], b = keys[i + 1], e = ease((u - a[0]) / Math.max(1e-6, b[0] - a[0]));
+  return { z: Math.exp(lerp(Math.log(a[1]), Math.log(b[1]), e)), x: lerp(a[2], b[2], e), y: lerp(a[3], b[3], e) };
+}
+function clampView(v) { const z = Math.max(1, v.z), h = 0.5 / z; return { z, x: Math.min(1 - h, Math.max(h, v.x)), y: Math.min(1 - h, Math.max(h, v.y)) }; }
+function mapRect(from, to) {   // 把按视角 from 画好的整张画，摆到视角 to 下应在的位置
+  const r = to.z / from.z;
+  return [W * ((0.5 - 0.5 * r) + (from.x - to.x) * to.z), H * ((0.5 - 0.5 * r) + (from.y - to.y) * to.z), W * r, H * r];
+}
+
+// ───────── p5：背景笔触 / 场景作画 / 纸纹 ─────────
+function setup() {
+  createCanvas(W, H, WEBGL); pixelDensity(1);
+  paperG = createGraphics(W, H); paperG.pixelDensity(1); paperG.loadPixels(); noiseSeed(4); randomSeed(4);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const n = noise(x * 0.004, y * 0.004) * 14 + noise(x * 0.08, y * 0.08) * 10 + random(-5, 5); paperG.pixels.set([228 + n, 221 + n, 204 + n, 255], (y * W + x) * 4); }
+  paperG.updatePixels();
+  toothG = createGraphics(W, H); toothG.pixelDensity(1); toothG.noStroke(); randomSeed(9);
+  for (let i = 0; i < 90000; i++) { const x = random(W), y = random(H), n = noise(x * 0.06, y * 0.06); if (n > 0.55) { toothG.fill(240, 234, 220, 70 + (n - 0.55) * 300); toothG.ellipse(x, y, random(1, 2.6), random(1, 2.2)); } }
+  noLoop();
+  window.READY = true;
+}
+function draw() {
+  if (!REQ) return;
+  translate(-width / 2, -height / 2);
+  if (REQ.mode === 'bg') { Object.assign(VIEW, REQ.view); image(paperG, 0, 0); brush.seed(REQ.seed); randomSeed(REQ.seed); SHOTS[REQ.shot].bg(); }
+  else if (REQ.mode === 'scene') {
+    Object.assign(VIEW, REQ.view); const [x, y, w, h] = mapRect(REQ.bgc.view, REQ.view);
+    background(20); image(REQ.bgc.g, x, y, w, h);
+    brush.seed(REQ.seed); randomSeed(REQ.seed); SHOTS[REQ.shot].dyn(REQ.u, REQ.t, REQ.k);
+  } else if (REQ.mode === 'tooth') image(toothG, 0, 0);
+}
+const glCanvas = () => document.querySelector('canvas.p5Canvas');
+
+const BG = new Map();      // shot → [{g, view}]
+const DRAW = new Map();    // 'shot|k' → {c, view}
+let STATS = { bg: 0, draw: 0, bgMs: 0, drawMs: 0 };
+function bgValid(bc, v) { const r = v.z / bc.view.z; if (r < 0.999 || r > 1.18) return false; const [x, y, w, h] = mapRect(bc.view, v); return x <= 0.5 && y <= 0.5 && x + w >= W - 0.5 && y + h >= H - 0.5; }
+function getBg(id, v) {
+  const list = BG.get(id) || []; const hit = list.find(bc => bgValid(bc, v)); if (hit) return hit;
+  const t0 = performance.now(); const view = clampView({ z: v.z / 1.06, x: v.x, y: v.y });
+  REQ = { mode: 'bg', shot: id, view, seed: 1000 + SHOT_IDX[id] }; redraw();
+  const g = createGraphics(W, H); g.pixelDensity(1); g.drawingContext.drawImage(glCanvas(), 0, 0);
+  const bc = { g, view }; list.push(bc); if (list.length > 3) list.shift().g.remove(); BG.set(id, list);
+  for (const k of BG.keys()) if (k !== id && BG.size > 3) { BG.get(k).forEach(b => b.g.remove()); BG.delete(k); }
+  STATS.bg++; STATS.bgMs += performance.now() - t0;
+  if (!bgValid(bc, v)) console.warn('bg cache does not cover view', id, v, view);
+  return bc;
+}
+function getDrawing(id, t) {
+  const k = Math.floor(t * DFPS + 1e-6), key = id + '|' + k; if (DRAW.has(key)) return DRAW.get(key);
+  const t0 = performance.now(), tk = (k + 0.5) / DFPS, u = uOf(id, tk), cam = camAt(id, u);
+  const view = clampView({ z: cam.z / 1.03, x: cam.x, y: cam.y });
+  const bgc = getBg(id, view);
+  REQ = { mode: 'scene', shot: id, view, bgc, u, t: tk, k, seed: k * 31 + SHOT_IDX[id] }; redraw();
+  REQ = { mode: 'tooth' }; redraw(); REQ = null;
+  const c = document.createElement('canvas'); c.width = W; c.height = H; c.getContext('2d').drawImage(glCanvas(), 0, 0);
+  const d = { c, view }; DRAW.set(key, d);
+  if (DRAW.size > 6) DRAW.delete(DRAW.keys().next().value);
+  STATS.draw++; STATS.drawMs += performance.now() - t0;
+  return d;
+}
+
+// ───────── 前景扫过的物件（蜡笔质感，2D 生成）─────────
+function rng(seed) { return () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296); }
+function crayonFill(ctx, path, base, strokes, { spacing = 7, angle = 0.5, width = 5, seed = 1 } = {}) {
+  const r = rng(seed); ctx.save(); ctx.clip(path); ctx.fillStyle = base; ctx.fillRect(-4000, -4000, 12000, 12000);
+  ctx.lineCap = 'round'; const L = 6000, ca = Math.cos(angle), sa = Math.sin(angle);
+  for (let d = -L; d < L; d += spacing) { ctx.strokeStyle = strokes[Math.floor(r() * strokes.length)]; ctx.globalAlpha = 0.35 + r() * 0.5; ctx.lineWidth = width * (0.5 + r());
+    ctx.beginPath(); for (let s = -L; s <= L; s += 160) { const x = 1000 + ca * s - sa * d + (r() - 0.5) * 6, y = 600 + sa * s + ca * d + (r() - 0.5) * 6; s === -L ? ctx.moveTo(x, y) : ctx.lineTo(x, y); } ctx.stroke(); }
+  ctx.globalAlpha = 1; for (let i = 0; i < 9000; i++) { ctx.fillStyle = r() < 0.5 ? 'rgba(255,250,235,0.35)' : 'rgba(30,20,10,0.18)'; ctx.fillRect(r() * 4000 - 500, r() * 2400 - 500, 2, 2); }
+  ctx.restore();
+}
+function raggedBand(len, thick, rough, seed, vertical = false) {   // 一条两端撕裂、中段完整覆盖画面的带状物
+  const r = rng(seed), p = new Path2D(), pts = [];
+  const N = 90; for (let i = 0; i <= N; i++) { const s = i / N; const e = Math.min(1, Math.min(s, 1 - s) * 7); pts.push([s * len, (thick / 2) * (1 - (1 - e) * 0.9) + (r() - 0.5) * rough]); }
+  const top = pts.map(([s, h]) => [s, thick / 2 - h]), bot = pts.slice().reverse().map(([s, h]) => [s, thick / 2 + h]);
+  const all = top.concat(bot).map(([a, b]) => vertical ? [b, a] : [a, b]);
+  p.moveTo(...all[0]); all.slice(1).forEach(q => p.lineTo(...q)); p.closePath(); return p;
+}
+const SPRITE = {};
+function makeSprite(obj, gold) {
+  const key = obj + (gold ? '_g' : ''); if (SPRITE[key]) return SPRITE[key];
+  const vertical = obj === 'wave' || obj === 'waterfilm';
+  const len = (vertical ? H : W) * 1.7, thick = (vertical ? W : H) + 260;
+  const c = document.createElement('canvas'); c.width = vertical ? thick : len; c.height = vertical ? len : thick; const x = c.getContext('2d');
+  x.translate(vertical ? 0 : 0, vertical ? 0 : 0);
+  const P = raggedBand(len, thick, 90, obj.length * 17 + (gold ? 5 : 0), vertical); const off = vertical ? [0, 0] : [0, 0];
+  const pal = {
+    curtain: gold ? ['#f2c27a', ['#e0955a', '#ffe1a8', '#d9784e']] : ['#4f8f99', ['#3e6a75', '#a7d1d4', '#2c5260']],
+    door: ['#5a3f45', ['#3a2a2e', '#7a5a5e', '#4a3238']], sand: gold ? ['#e8b06a', ['#f6d08a', '#c9884a', '#fff0c0']] : ['#6a5a6a', ['#8a7a7a', '#4a3e52', '#a09080']],
+    leaves: ['#8a5a32', ['#c4844f', '#5a3a22', '#e0a060']], splash: ['#a9c4e4', ['#e8f0fa', '#6f8fc0', '#ffffff']], wave: ['#34508a', ['#5a78b8', '#e8f0fa', '#22386a']],
+    waterfilm: ['#9fb8d8', ['#dfe9f6', '#7896c0']], ripple: ['#f6e2a8', ['#fff2c4', '#a8b8e8']], cloud: ['#1a1f40', ['#2a3060', '#10142c']],
+    lighthouse: ['#ffe9b0', ['#fff6d8', '#ffd98a']], flame: ['#ffb04a', ['#ffe08a', '#e0782f', '#fff2c4']], flare: gold ? ['#ffd98a', ['#fff2c4', '#f4b456']] : ['#ffe1a0', ['#fff6d8', '#ffd36e']],
+    fog: ['#c9d0e0', ['#e8ecf4', '#9aa6c4']], paper: ['#fbf5e6', ['#efe4cc', '#ffffff', '#d8c8a8']], pane: ['#e8b08a', ['#fff2c4', '#d98a5a', '#ffffff']], dust: ['#c9b8a0', ['#e8dcc8', '#9a8a78']],
+  }[obj] || ['#4f8f99', ['#3e6a75', '#a7d1d4']];
+  crayonFill(x, P, pal[0], pal[1], { spacing: obj === 'curtain' || obj === 'door' ? 9 : 7, angle: obj === 'curtain' || obj === 'door' ? Math.PI / 2 : (vertical ? Math.PI / 2 + 0.2 : 0.35), width: 6, seed: obj.length * 7 });
+  x.save(); x.clip(P); x.lineCap = 'round'; const r = rng(99 + obj.length);
+  if (obj === 'curtain') for (let i = 0; i < 26; i++) { const fx = i / 26 * len; x.strokeStyle = i % 2 ? pal[1][0] : pal[1][1]; x.globalAlpha = 0.6; x.lineWidth = 30; x.beginPath(); x.moveTo(fx, 0); for (let y = 0; y < thick; y += 40) x.lineTo(fx + Math.sin(y / 120 + i) * 26, y); x.stroke(); }
+  if (obj === 'door') { x.strokeStyle = '#2a1c1e'; x.globalAlpha = 0.8; x.lineWidth = 8; for (let i = 1; i < 9; i++) { x.beginPath(); x.moveTo(i * len / 9, 0); x.lineTo(i * len / 9, thick); x.stroke(); } }
+  if (obj === 'leaves' || obj === 'dust' || obj === 'splash') for (let i = 0; i < 700; i++) { x.fillStyle = pal[1][i % pal[1].length]; x.globalAlpha = 0.8; x.beginPath(); x.ellipse(r() * len, r() * thick, obj === 'dust' ? 5 : 26, obj === 'dust' ? 5 : 12, r() * 6, 0, Math.PI * 2); x.fill(); }
+  if (obj === 'pane' || obj === 'flare' || obj === 'lighthouse') { x.strokeStyle = '#ffffff'; x.globalAlpha = 0.55; for (let i = 0; i < 8; i++) { x.lineWidth = 30 + r() * 60; x.beginPath(); const sx = r() * len; x.moveTo(sx, 0); x.lineTo(sx + 400, thick); x.stroke(); } }
+  if (obj === 'wave') { x.strokeStyle = '#ffffff'; x.globalAlpha = 0.9; x.lineWidth = 26; x.beginPath(); for (let i = 0; i <= 40; i++) { const xx = i / 40 * thick; x.lineTo(xx, 120 + Math.sin(i * 1.3) * 30); } x.stroke(); }
+  if (obj === 'paper') { x.strokeStyle = '#c9b8a0'; x.globalAlpha = 0.7; x.lineWidth = 4; x.beginPath(); x.moveTo(len * 0.5, 0); x.lineTo(len * 0.52, thick); x.stroke(); }
+  x.restore();
+  return (SPRITE[key] = { c, vertical, len });
+}
+const GOLD_FROM = new Set(['L37', 'L38', 'L39', 'L40', 'L41', 'L42', 'L43', 'L44', 'L45', 'L46', 'L47', 'O01', 'L48']);
+function drawWipe(X, p) {
+  if (X.obj === 'ripple' || X.obj === 'fog') {   // 由中心扩散的环带：p=0.5 时整屏覆盖
+    const maxR = Math.hypot(W, H) / 2 + 40, r2 = maxR * Math.min(1, p * 2) * 1.02, r1 = maxR * Math.max(0, p * 2 - 1);
+    const sp = makeSprite(X.obj, false); OCTX.save(); OCTX.beginPath(); OCTX.arc(W / 2, H / 2, r2, 0, Math.PI * 2); if (r1 > 0) OCTX.arc(W / 2, H / 2, r1, 0, Math.PI * 2, true); OCTX.clip('evenodd');
+    OCTX.drawImage(sp.c, -200, -130, W + 400, H + 260); OCTX.restore(); return;
+  }
+  const sp = makeSprite(X.obj, GOLD_FROM.has(X.out) || X.id === 'X53');
+  const q = (X.dir === 'rtl' || X.dir === 'btt') ? 1 - p : p;
+  if (!sp.vertical) { const x = lerp(-sp.len, W, q); OCTX.drawImage(sp.c, x, -130); }
+  else { const y = lerp(-sp.len, H, q); OCTX.drawImage(sp.c, -130, y); }
+}
+
+// ───────── 合成一帧 ─────────
+function putDrawing(id, t, dx = 0, dy = 0, alpha = 1) {
+  const d = getDrawing(id, t), cam = clampView(camAt(id, uOf(id, t))); const [x, y, w, h] = mapRect(d.view, cam);
+  OCTX.globalAlpha = alpha; OCTX.drawImage(d.c, x + dx, y + dy, w, h); OCTX.globalAlpha = 1;
+}
+function renderFrame(t) {
+  OCTX.setTransform(1, 0, 0, 1, 0, 0); OCTX.fillStyle = '#141018'; OCTX.fillRect(0, 0, W, H);
+  const st = stateAt(t);
+  if (st.mode === 'single') putDrawing(st.shot, t);
+  else if (st.mode === 'wipe') { putDrawing(st.shot, t); drawWipe(st.X, st.p); }
+  else {   // 甩镜：两镜头顺着甩动方向连续移动 + 方向性运动模糊
+    const X = st.X, k = st.p < 0.5 ? 4 * st.p ** 3 : 1 - (-2 * st.p + 2) ** 3 / 2, horiz = X.dir === 'left' || X.dir === 'right';
+    const sgn = X.dir === 'right' || X.dir === 'down' ? -1 : 1, D = horiz ? W : H, off = sgn * k * D;
+    const blur = Math.sin(Math.PI * st.p) * 90;
+    for (const [id, base] of [[X.out, 0], [X.inn, -sgn * D]]) for (let i = -2; i <= 2; i++) {
+      const o = base + off + i * blur; putDrawing(id, t, horiz ? o : 0, horiz ? 0 : o, i === 0 ? 1 : 0.22);
+    }
+    const s = Math.pow(Math.sin(Math.PI * st.p), 3);
+    if (s > 0.02) { const tmp = OCTX.getImageData(0, 0, 1, 1); OCTX.save(); OCTX.globalAlpha = s; // 拉丝：把当前画面沿甩动方向拉长
+      if (horiz) OCTX.drawImage($out, 0, 0, W, H, -3.5 * W, 0, 8 * W, H); else OCTX.drawImage($out, 0, 0, W, H, 0, -3.5 * H, W, 8 * H);
+      OCTX.restore(); }
+  }
+  // 片尾淡出（4:50.5 起）
+  if (t > 290.5) { OCTX.fillStyle = `rgba(10,8,12,${Math.min(1, (t - 290.5) / 3.6)})`; OCTX.fillRect(0, 0, W, H); }
+  // 歌词：最上层、画面下方、不随镜头运动
+  const line = SRT.find(l => t >= l.a && t < l.b);
+  if (line) {
+    OCTX.save(); OCTX.font = 'bold 62px "KaiTi","STKaiti","楷体",serif'; OCTX.textAlign = 'center'; OCTX.textBaseline = 'alphabetic';
+    OCTX.lineJoin = 'round'; OCTX.lineWidth = 11; OCTX.strokeStyle = 'rgba(38,22,14,0.88)'; OCTX.shadowColor = 'rgba(0,0,0,0.35)'; OCTX.shadowBlur = 10;
+    OCTX.strokeText(line.text, W / 2, H - 70); OCTX.shadowBlur = 0; OCTX.fillStyle = '#fff4dc'; OCTX.fillText(line.text, W / 2, H - 70); OCTX.restore();
+  }
+}
+
+// ───────── 输出 ─────────
+async function init() {
+  TL = await (await fetch('timeline.json')).json(); TL.shots.forEach((s, i) => SHOT_IDX[s.id] = i);
+  const srt = await (await fetch('../lyrics.srt')).text();
+  const tc = s => { const [h, m, r] = s.trim().split(':'); return +h * 3600 + +m * 60 + parseFloat(r.replace(',', '.')); };
+  SRT = srt.trim().split(/\r?\n\r?\n/).map(b => { const L = b.split(/\r?\n/); const [a, z] = L[1].split('-->'); return { a: tc(a), b: tc(z), text: L.slice(2).join(' ').trim() }; });
+  while (!window.READY) await new Promise(r => setTimeout(r, 50));
+  for (const id of Object.keys(SHOTS)) if (!(id in SHOT_IDX)) console.warn('shot not in timeline', id);
+  for (const s of TL.shots) if (!SHOTS[s.id]) console.warn('missing scene', s.id);
+  log('ready'); return true;
+}
+window.INIT = init();
+window.saveFrame = async (t, name) => { renderFrame(t); const b = await new Promise(r => $out.toBlob(r, 'image/png')); return (await fetch('/save?name=' + name, { method: 'POST', body: b })).json(); };
+window.PROG = {};
+window.renderSegment = async (f0, f1, out) => {
+  const st = await (await fetch(`/stream/start?out=${out}&fps=${FPS}&fmt=raw`, { method: 'POST' })).json(); if (st.err) return st;
+  const T0 = performance.now(); PROG = { f0, f1, f: f0, out, startedAt: Date.now() };
+  for (let f = f0; f < f1; f++) {
+    renderFrame(f / FPS);
+    const px = OCTX.getImageData(0, 0, W, H).data.buffer;
+    await fetch('/stream/frame', { method: 'POST', body: px });
+    PROG.f = f + 1; if (f % 15 === 0) log(`${out}: ${f + 1}/${f1}  ${((performance.now() - T0) / (f - f0 + 1)).toFixed(0)} ms/帧  bg ${STATS.bg} draw ${STATS.draw}`);
+  }
+  const end = await (await fetch('/stream/end', { method: 'POST' })).json(); PROG.done = end; return end;
+};
+// 主输出路径：浏览器内 WebCodecs 编码 H.264（Annex B），码流按块追加写入 render/film.h264，最后由 ffmpeg 无损封装
+window.renderWC = async (f0, f1, name = 'render/film.h264', truncate = true) => {
+  if (truncate) await fetch('/truncate?name=' + name, { method: 'POST', body: new Uint8Array(0) });
+  let pending = [], bytes = 0, err = null; const T0 = performance.now();
+  const enc = new VideoEncoder({ output: c => { const b = new Uint8Array(c.byteLength); c.copyTo(b); pending.push(b); }, error: e => { err = e; } });
+  enc.configure({ codec: 'avc1.640028', width: W, height: H, bitrate: 30e6, bitrateMode: 'variable', framerate: FPS, latencyMode: 'quality', avc: { format: 'annexb' } });
+  const flush = async () => { if (!pending.length) return; const n = pending.reduce((a, b) => a + b.length, 0), buf = new Uint8Array(n); let o = 0; for (const p of pending) { buf.set(p, o); o += p.length; } pending = []; await fetch('/append?name=' + name, { method: 'POST', body: buf }); bytes += n; };
+  window.PROG = { f0, f1, f: f0, name, bytes: 0 };
+  for (let f = f0; f < f1; f++) {
+    renderFrame(f / FPS);
+    const vf = new VideoFrame($out, { timestamp: Math.round(f * 1e6 / FPS), duration: Math.round(1e6 / FPS) });
+    enc.encode(vf, { keyFrame: (f - f0) % 60 === 0 }); vf.close();
+    while (enc.encodeQueueSize > 4) await new Promise(r => setTimeout(r, 0));
+    if (err) { PROG.err = String(err); throw err; }
+    if (f % 30 === 29) { await flush(); PROG.f = f + 1; PROG.bytes = bytes; PROG.msPerFrame = Math.round((performance.now() - T0) / (f - f0 + 1)); log(`${f + 1}/${f1}  ${PROG.msPerFrame} ms/帧  作画 ${STATS.draw}  背景 ${STATS.bg}`); }
+  }
+  await enc.flush(); await flush(); enc.close(); Object.assign(PROG, { f: f1, bytes, done: true }); return PROG;
+};
+window.renderAll = async (segLen = 900, from = 0) => {
+  const N = Math.ceil(TL.duration * FPS); window.ALL = { N, segs: [] };
+  for (let s = from, i = Math.floor(from / segLen); s < N; s += segLen, i++) {
+    const out = `render/seg_${String(i).padStart(2, '0')}.mp4`; const r = await window.renderSegment(s, Math.min(N, s + segLen), out); window.ALL.segs.push(r);
+    if (r.rc !== 0) { window.ALL.error = r; return r; }
+  }
+  window.ALL.done = true; return window.ALL;
+};
+</script>
+</body>
+</html>

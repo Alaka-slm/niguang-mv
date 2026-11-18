@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>逆光 · 开场 · 纸艺拼贴绘本</title>
+<style>
+  html,body{margin:0;height:100%;background:#111;display:flex;align-items:center;justify-content:center}
+  canvas{max-width:100vw;max-height:100vh}
+</style>
+</head>
+<body>
+<canvas id="out" width="1920" height="1080"></canvas>
+<script>
+// ───── 规格：每个元素 = 一张纸（剪纸白边 或 撕纸毛边）+ 投影，层层叠放；底纹为牛皮纸/旧报纸；
+//        动画 10 fps，每次每张纸随机抖动 1–2 px ─────
+const CW = 1920, CH = 1080;
+const out = document.getElementById('out'), octx = out.getContext('2d');
+function rng(seed) { return () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296); }
+const mk = (w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; };
+
+// ───── 纸张纹理 ─────
+function grainTile(seed, size = 256) {
+  const c = mk(size, size), x = c.getContext('2d'), r = rng(seed);
+  const img = x.createImageData(size, size);
+  for (let i = 0; i < size * size; i++) {
+    const v = r() < 0.5 ? 0 : 255, a = r() * 22;
+    img.data.set([v, v, v, a], i * 4);
+  }
+  x.putImageData(img, 0, 0);
+  for (let i = 0; i < 90; i++) {           // 纸纤维
+    x.strokeStyle = r() < 0.5 ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.08)';
+    x.lineWidth = 0.6 + r();
+    const sx = r() * size, sy = r() * size, a = r() * Math.PI;
+    x.beginPath(); x.moveTo(sx, sy);
+    x.quadraticCurveTo(sx + Math.cos(a) * 8 + r() * 4, sy + Math.sin(a) * 8, sx + Math.cos(a) * 16, sy + Math.sin(a) * 16);
+    x.stroke();
+  }
+  return c;
+}
+const GRAIN = grainTile(7);
+function kraftCanvas() {
+  const c = mk(CW, CH), x = c.getContext('2d'), r = rng(11);
+  x.fillStyle = '#9c7a55'; x.fillRect(0, 0, CW, CH);
+  for (let i = 0; i < 40; i++) {           // 牛皮纸的深浅斑
+    const g = x.createRadialGradient(r() * CW, r() * CH, 0, r() * CW, r() * CH, 80 + r() * 260);
+    g.addColorStop(0, r() < 0.5 ? 'rgba(70,45,20,0.10)' : 'rgba(255,230,190,0.07)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+    x.fillStyle = g; x.fillRect(0, 0, CW, CH);
+  }
+  x.fillStyle = x.createPattern(GRAIN, 'repeat'); x.fillRect(0, 0, CW, CH);
+  for (let i = 0; i < 1400; i++) {
+    x.strokeStyle = r() < 0.5 ? 'rgba(60,38,18,0.18)' : 'rgba(230,205,160,0.16)'; x.lineWidth = 0.8;
+    const sx = r() * CW, sy = r() * CH, a = (r() - 0.5) * 0.6;
+    x.beginPath(); x.moveTo(sx, sy); x.lineTo(sx + Math.cos(a) * (6 + r() * 22), sy + Math.sin(a) * (6 + r() * 22)); x.stroke();
+  }
+  return c;
+}
+function newsprintTile(seed) {             // 旧报纸：只有灰色“栏线”，不出现可读文字
+  const c = mk(360, 300), x = c.getContext('2d'), r = rng(seed);
+  x.fillStyle = '#ddd5c2'; x.fillRect(0, 0, 360, 300);
+  x.fillStyle = 'rgba(60,55,50,0.55)'; x.fillRect(14, 12, 220, 14);
+  for (let col = 0; col < 3; col++) for (let y = 40; y < 290; y += 7) {
+    const len = y % 49 === 5 ? 40 + r() * 40 : 96 - r() * (r() < 0.15 ? 60 : 6);
+    x.fillStyle = `rgba(70,64,58,${0.22 + r() * 0.12})`; x.fillRect(14 + col * 112, y, len, 2.2);
+  }
+  x.fillStyle = 'rgba(120,90,40,0.10)'; x.fillRect(0, 0, 360, 300);
+  x.drawImage(GRAIN, 0, 0);
+  return c;
+}
+
+// ───── 撕纸 / 剪纸路径 ─────
+function ellipsePts(cx, cy, rx, ry, n = 72) { const p = []; for (let i = 0; i < n; i++) { const a = i / n * Math.PI * 2; p.push([cx + Math.cos(a) * rx, cy + Math.sin(a) * ry]); } return p; }
+function tornPts(pts, rough, seed, step = 7) {
+  const r = rng(seed), o = []; let d = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const [ax, ay] = pts[i], [bx, by] = pts[(i + 1) % pts.length];
+    const L = Math.hypot(bx - ax, by - ay), n = Math.max(1, Math.round(L / step)), nx = -(by - ay) / (L || 1), ny = (bx - ax) / (L || 1);
+    for (let k = 0; k < n; k++) {
+      d = d * 0.55 + (r() - 0.5) * rough * 1.6;               // 低频起伏 + 高频毛刺
+      const t = k / n, j = d + (r() - 0.5) * rough * 0.6;
+      o.push([ax + (bx - ax) * t + nx * j, ay + (by - ay) * t + ny * j]);
+    }
+  }
+  return o;
+}
+function pathOf(ctx, pts) { ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); for (const p of pts.slice(1)) ctx.lineTo(p[0], p[1]); ctx.closePath(); }
+
+// 一张纸元素：先画白边层（带投影），再画彩色纸面与纹理
+function paper(o) {
+  const shapes = o.shapes.map(s => s.e ? ellipsePts(...s.e) : s);
+  const all = shapes.flat(), pad = 60;
+  const x0 = Math.floor(Math.min(...all.map(p => p[0])) - pad), y0 = Math.floor(Math.min(...all.map(p => p[1])) - pad);
+  const w = Math.ceil(Math.max(...all.map(p => p[0])) + pad) - x0, h = Math.ceil(Math.max(...all.map(p => p[1])) + pad) - y0;
+  const c = mk(w, h), x = c.getContext('2d'), rim = mk(w, h), rx = rim.getContext('2d');
+  x.translate(-x0, -y0); rx.translate(-x0, -y0);
+  const seed = o.seed ?? 1, torn = o.edge === 'torn', border = o.border ?? (torn ? 5 : 7);
+  // 白边：剪纸 = 均匀圆角白边；撕纸 = 另一条随机撕边露出的白色纸芯 + 纤维毛刺
+  rx.fillStyle = rx.strokeStyle = o.borderColor ?? '#f2ede2'; rx.lineJoin = 'round'; rx.lineWidth = border * 2;
+  shapes.forEach((s, i) => {
+    const p = torn ? tornPts(s, o.rough ?? 5, seed * 31 + i * 7) : s;
+    pathOf(rx, p); if (border > 0) rx.stroke(); rx.fill();
+    if (torn && border > 0) {
+      const r = rng(seed + i); rx.lineWidth = 0.8;
+      for (const [px, py] of p) if (r() < 0.25) { const a = r() * 6.28; rx.beginPath(); rx.moveTo(px, py); rx.lineTo(px + Math.cos(a) * (border + 3), py + Math.sin(a) * (border + 3)); rx.stroke(); }
+      rx.lineWidth = border * 2;
+    }
+  });
+  const [sdx, sdy, sblur, salpha] = o.shadow ?? [5, 7, 10, 0.4];
+  x.save(); x.setTransform(1, 0, 0, 1, 0, 0);
+  x.shadowColor = `rgba(15,8,0,${salpha})`; x.shadowOffsetX = sdx; x.shadowOffsetY = sdy; x.shadowBlur = sblur;
+  x.drawImage(rim, 0, 0); x.restore();
+  // 彩色纸面
+  x.fillStyle = o.color;
+  const faces = shapes.map((s, i) => torn ? tornPts(s, (o.rough ?? 5) * 0.8, seed * 17 + i * 3) : s);
+  faces.forEach(p => { pathOf(x, p); x.fill(); });
+  if (o.texture) { x.save(); faces.forEach(p => pathOf(x, p)); x.beginPath(); faces.forEach(p => { x.moveTo(p[0][0], p[0][1]); p.forEach(q => x.lineTo(q[0], q[1])); x.closePath(); }); x.clip(); x.fillStyle = x.createPattern(o.texture, 'repeat'); x.globalAlpha = o.textureAlpha ?? 1; x.fillRect(x0, y0, w, h); x.restore(); }
+  x.save(); x.globalCompositeOperation = 'source-atop'; x.fillStyle = x.createPattern(GRAIN, 'repeat'); x.fillRect(x0, y0, w, h); x.restore();
+  if (o.extra) o.extra(x);
+  return { c, x: x0, y: y0, alpha: o.alpha ?? 1, op: o.op };
+}
+
+// ───── 场景（与像素版同一构图：320×180 坐标 ×6）─────
+const L = [];
+const add = o => L.push(paper(o));
+const KRAFT = kraftCanvas();
+const NEWS = newsprintTile(3), NEWS2 = newsprintTile(9);
+
+// 墙：深靛蓝纸 + 三层越来越浅的撕纸“光晕”
+add({ shapes: [[[34, 30], [1888, 26], [1892, 790], [28, 796]]], color: '#161a3c', edge: 'torn', rough: 9, seed: 2, shadow: [6, 8, 14, 0.5] });
+add({ shapes: [{ e: [1360, 410, 820, 540] }], color: '#1f2652', edge: 'torn', rough: 10, seed: 3, shadow: [4, 6, 12, 0.35] });
+add({ shapes: [{ e: [1362, 420, 560, 420] }], color: '#2a356c', edge: 'torn', rough: 9, seed: 4, shadow: [4, 6, 12, 0.35] });
+add({ shapes: [{ e: [1362, 430, 360, 330] }], color: '#384b88', edge: 'torn', rough: 8, seed: 5, shadow: [4, 6, 10, 0.35] });
+// 墙上的报纸剪报画框（栏线不可读）
+add({ shapes: [[[548, 284], [736, 280], [740, 462], [544, 466]]], color: '#141832', edge: 'cut', border: 5, seed: 6 });
+add({ shapes: [[[566, 300], [720, 298], [722, 446], [564, 448]]], color: '#c9c0ae', edge: 'torn', rough: 4, texture: NEWS, seed: 7, shadow: [3, 4, 6, 0.4],
+  extra: x => { x.globalCompositeOperation = 'source-atop'; x.fillStyle = 'rgba(30,38,90,0.5)'; x.fillRect(560, 290, 170, 165); x.globalCompositeOperation = 'source-over'; } });
+// 地板：一条条深紫棕纸条
+const planks = [[770, 812, '#2c2333'], [806, 858, '#352b3d'], [852, 916, '#2e2536'], [910, 990, '#382d40'], [984, 1056, '#2f2637']];
+planks.forEach(([a, b, col], i) => add({ shapes: [[[30, a], [1890, a - 4], [1894, b], [26, b + 3]]], color: col, edge: 'torn', rough: 6, seed: 20 + i, shadow: [3, 5, 8, 0.45] }));
+// 窗外：浅冷灰蓝纸 + 远处屋顶剪纸 + 两层半透明描图纸的光核
+add({ shapes: [[[1224, 156], [1500, 156], [1500, 708], [1224, 708]]], color: '#d6e3ec', edge: 'cut', border: 6, seed: 30 });
+add({ shapes: [[[1224, 708], [1224, 624], [1260, 624], [1260, 600], [1296, 600], [1296, 636], [1332, 636], [1332, 582], [1374, 582], [1374, 618], [1410, 618], [1410, 648], [1446, 648], [1446, 606], [1500, 606], [1500, 708]]], color: '#8ea3c4', edge: 'cut', border: 4, seed: 31, shadow: [2, 3, 5, 0.3] });
+add({ shapes: [{ e: [1374, 270, 70, 70] }], color: '#ffffff', edge: 'torn', rough: 3, border: 3, seed: 32, alpha: 0.75, shadow: [2, 3, 6, 0.2] });
+add({ shapes: [{ e: [1374, 270, 120, 115] }], color: '#ffffff', edge: 'torn', rough: 5, border: 0, seed: 33, alpha: 0.28, shadow: [0, 0, 0, 0] });
+// 窗框（剪纸细条）与推开的右扇窗
+const bars = [[1206, 138, 1518, 156], [1206, 708, 1518, 726], [1206, 138, 1224, 726], [1500, 138, 1518, 726], [1356, 156, 1368, 708], [1224, 378, 1500, 390], [1194, 726, 1530, 742]];
+bars.forEach(([a, b, c2, d], i) => add({ shapes: [[[a, b], [c2, b], [c2, d], [a, d]]], color: '#141832', edge: 'cut', border: 4, seed: 40 + i, shadow: [3, 4, 6, 0.45] }));
+add({ shapes: [[[1520, 140], [1600, 104], [1600, 760], [1520, 724]]], color: '#141832', edge: 'cut', border: 5, seed: 48 });
+add({ shapes: [[[1534, 162], [1588, 138], [1588, 726], [1534, 702]]], color: '#6f86b8', edge: 'cut', border: 0, seed: 49, alpha: 0.8, shadow: [0, 0, 0, 0] });
+add({ shapes: [[[1116, 124], [1596, 124], [1596, 134], [1116, 134]]], color: '#0e1128', edge: 'cut', border: 3, seed: 50 });
+// 窗帘：两层半透明青色薄纸，被风吹进屋
+function curtainPts(ph, shift) {
+  const left = [], right = [];
+  for (let yp = 23; yp <= 122; yp += 3) {
+    const k = (yp - 23) / 99;
+    left.push([(205 - k * 30 - 7 * Math.sin(yp / 11 + ph) * k) * 6 + shift, yp * 6]);
+    right.push([(214 - k * 6 + 2 * Math.sin(yp / 8 + ph)) * 6, yp * 6]);
+  }
+  return left.concat(right.reverse());
+}
+add({ shapes: [curtainPts(0, 0)], color: '#5f949e', edge: 'torn', rough: 4, border: 4, seed: 51, alpha: 0.85, shadow: [6, 8, 14, 0.4] });
+add({ shapes: [curtainPts(0.9, 30)], color: '#a8d0d4', edge: 'torn', rough: 4, border: 3, seed: 52, alpha: 0.55, shadow: [3, 4, 8, 0.2] });
+add({ shapes: [[[1512, 140], [1572, 140], [1584, 760], [1530, 762]]], color: '#3f6672', edge: 'torn', rough: 4, seed: 53, alpha: 0.9 });
+// 地上光斑（描图纸）+ 窗棂投影
+add({ shapes: [[[1224, 772], [1500, 772], [1572, 1060], [900, 1060]]], color: '#e9eef6', edge: 'torn', rough: 6, border: 0, seed: 60, alpha: 0.42, shadow: [0, 0, 0, 0] });
+add({ shapes: [[[1356, 772], [1370, 772], [1250, 1060], [1232, 1060]], [[960, 896], [1540, 896], [1546, 910], [954, 910]]], color: '#2a2231', edge: 'torn', rough: 3, border: 0, seed: 61, alpha: 0.7, shadow: [0, 0, 0, 0] });
+// 一道光柱：一张大幅半透明描图纸
+add({ shapes: [[[1224, 170], [1500, 170], [1596, 1062], [840, 1062]]], color: '#eef4fb', edge: 'torn', rough: 7, border: 0, seed: 62, alpha: 0.13, shadow: [0, 0, 0, 0] });
+// 旧椅子
+const chair = [[336, 624, 360, 852], [456, 624, 480, 948], [330, 816, 498, 840], [348, 840, 366, 1010], [468, 840, 486, 984], [336, 624, 480, 646]];
+add({ shapes: chair.map(([a, b, c2, d]) => [[a, b], [c2, b], [c2, d], [a, d]]), color: '#10132b', edge: 'cut', border: 5, seed: 70, shadow: [6, 8, 10, 0.5] });
+// 影子：深色半透明纸，拖向镜头
+add({ shapes: [[[966, 954], [1050, 954], [876, 1066], [660, 1066]]], color: '#0b0912', edge: 'torn', rough: 5, border: 0, seed: 80, alpha: 0.6, shadow: [0, 0, 0, 0] });
+// 女孩：一张完整剪影（剪纸白边）+ 右缘贴一条冷白轮廓光纸条
+const girl = [
+  { e: [1008, 680, 33, 36] },
+  [[976, 672], [1040, 672], [1046, 740], [1052, 768], [964, 768], [970, 740]],
+  [[958, 744], [1058, 744], [1084, 766], [1096, 858], [1082, 862], [1070, 806], [1066, 840], [1082, 906], [934, 906], [950, 840], [946, 806], [934, 862], [920, 858], [932, 766]],
+  [[978, 904], [996, 904], [996, 952], [978, 952]], [[1026, 904], [1044, 904], [1044, 952], [1026, 952]],
+  { e: [985, 956, 15, 7] }, { e: [1037, 956, 15, 7] },
+];
+add({ shapes: girl, color: '#15121f', edge: 'cut', border: 7, seed: 90, shadow: [8, 10, 14, 0.55],
+  extra: x => {
+    x.fillStyle = '#d5e6f0';
+    x.beginPath(); x.ellipse(1008, 680, 33, 36, 0, -1.9, 0.9); x.ellipse(1003, 684, 30, 34, 0, 0.9, -1.9, true); x.fill();
+    pathOf(x, [[1044, 744], [1058, 746], [1070, 762], [1064, 840], [1082, 904], [1072, 904], [1054, 840], [1060, 764]]); x.fill();
+    pathOf(x, [[1072, 756], [1084, 766], [1096, 858], [1089, 859], [1078, 790]]); x.fill();
+  } });
+// 围巾：唯一的暖色，撕纸边，尾巴被风扯向左
+add({ shapes: [[[962, 734], [1054, 734], [1058, 756], [958, 756]], [[966, 736], [920, 728], [882, 738], [848, 728], [838, 750], [880, 758], [920, 750], [962, 756]]], color: '#b8615c', edge: 'torn', rough: 3, border: 4, seed: 95, shadow: [4, 6, 8, 0.45],
+  extra: x => { x.fillStyle = 'rgba(70,20,30,0.35)'; pathOf(x, [[838, 744], [880, 752], [920, 746], [962, 752], [962, 756], [920, 750], [880, 758], [838, 750]]); x.fill(); } });
+// 浮尘 = 打孔机打出的小白纸点；被风卷进来的报纸碎片
+{ const r = rng(5);
+  for (let i = 0; i < 14; i++) { const yp = 40 + r() * 110, cx = 227 - (yp - 30) * 0.18, xp = cx + (r() - 0.5) * (40 + (yp - 30) * 0.45);
+    add({ shapes: [{ e: [xp * 6, yp * 6, 4 + r() * 3, 4 + r() * 3, 16] }], color: '#f4f6f8', edge: 'cut', border: 0, seed: 100 + i, shadow: [2, 3, 3, 0.45] }); }
+  [[780, 900, 0.3], [690, 846, -0.4], [600, 960, 0.15]].forEach(([cx, cy, a], i) => {
+    const pts = [[-22, -12], [24, -9], [20, 13], [-18, 10]].map(([dx, dy]) => [cx + dx * Math.cos(a) - dy * Math.sin(a), cy + dx * Math.sin(a) + dy * Math.cos(a)]);
+    add({ shapes: [pts], color: '#cfc6b3', edge: 'torn', rough: 2, border: 2, texture: NEWS2, seed: 120 + i, shadow: [4, 6, 6, 0.5],
+      extra: x => { x.globalCompositeOperation = 'source-atop'; x.fillStyle = 'rgba(50,60,120,0.4)'; x.fillRect(cx - 40, cy - 40, 80, 80); x.globalCompositeOperation = 'source-over'; } });
+  }); }
+
+// 夜色压暗（静态，不抖动）
+const vig = mk(CW, CH); { const x = vig.getContext('2d'); const g = x.createRadialGradient(1300, 560, 300, 1100, 560, 1250); g.addColorStop(0, 'rgba(10,8,30,0)'); g.addColorStop(1, 'rgba(10,8,30,0.55)'); x.fillStyle = g; x.fillRect(0, 0, CW, CH); }
+
+// ───── 合成与动画 ─────
+function render(jitter) {
+  octx.globalAlpha = 1; octx.drawImage(KRAFT, 0, 0);
+  for (const el of L) {
+    let dx = 0, dy = 0;
+    if (jitter) { const a = Math.random() * Math.PI * 2, m = 1 + Math.random(); dx = Math.round(Math.cos(a) * m); dy = Math.round(Math.sin(a) * m); if (!dx && !dy) dx = Math.random() < 0.5 ? -1 : 1; }
+    octx.globalAlpha = el.alpha; octx.drawImage(el.c, el.x + dx, el.y + dy);
+  }
+  octx.globalAlpha = 1; octx.drawImage(vig, 0, 0);
+}
+render(false);
+window.anim = setInterval(() => render(true), 100);   // 10 fps，每张纸随机抖动 1–2 px
+
+window.exportPNG = async (name = '2_paper.png') => {
+  clearInterval(window.anim); render(false);
+  const blob = await new Promise(r => out.toBlob(r, 'image/png'));
+  const res = await fetch('/save?name=' + name, { method: 'POST', body: blob });
+  return { status: await res.text(), layers: L.length };
+};
+</script>
+</body>
+</html>
