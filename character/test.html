@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="zh"><head><meta charset="utf-8"><title>Crab 回归测试：朝向 × 动作 × 道具</title>
+<script src="../opening/lib/p5.min.js"></script><script src="../opening/lib/p5.brush.js"></script><script src="character.js"></script>
+<style>html,body{margin:0;background:#222}canvas{max-width:100vw!important;height:auto!important}</style></head><body>
+<script>
+// 改动 character.js 后打开本页，检查：道具是否贴在螯尖、是否遮脸、各朝向造型是否一致。
+const CASES = [
+  { action: 'idle' }, { action: 'walk', t: 0.3 }, { action: 'jump', t: 0.5, expression: 'happy' },
+  { action: 'hug', prop: 'star', expression: 'happy' }, { action: 'hold', prop: 'lantern' },
+  { action: 'hold', prop: 'flower', holdSide: 'far', expression: 'shy' }, { action: 'hold', prop: 'letter', expression: 'sad' },
+];
+const FACE = ['front', 'right', 'left', 'back'];
+let step = 0; window.done = false;
+function setup() { createCanvas(1920, 1080, WEBGL); pixelDensity(1); brush.seed(3); noLoop(); }
+function draw() {
+  if (step === 0) {
+    translate(-width / 2, -height / 2); background('#efe8da');
+    FACE.forEach((f, r) => CASES.forEach((c, i) => Crab.draw(Object.assign({ x: 140 + i * 274, y: 230 + r * 262, size: 0.62, facing: f }, c))));
+  } else window.done = true;
+  step++;
+}
+window.exportPNG = async (name = 'character/test_grid.png') => {
+  while (!window.done) { redraw(); await new Promise(r => setTimeout(r, 50)); }
+  const blob = await new Promise(r => document.querySelector('canvas.p5Canvas').toBlob(r, 'image/png'));
+  return (await fetch('/save?name=' + name, { method: 'POST', body: blob })).text();
+};
+</script></body></html>

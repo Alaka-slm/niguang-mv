@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>逆光 · 分镜关键帧草图</title>
+<style>html,body{margin:0;background:#222}canvas{max-width:100vw!important;height:auto!important}</style>
+<script src="../opening/lib/p5.min.js"></script>
+<script src="../opening/lib/p5.brush.js"></script>
+<script src="../character/character.js"></script>
+</head>
+<body>
+<script>
+// 每个镜头一张关键帧草图（1920×1080，蜡笔笔刷）。角色一律经由 Crab.draw() / Crab.drawProp() 绘制。
+// 用法：exportAll() 逐镜头渲染并存为 storyboard/<镜头号>.png
+const W = 1920, H = 1080;
+let paperG, toothG, CUR = null, PHASE = 0;
+
+// ───────── 笔刷工具 ─────────
+const R = (x, y, w, h) => [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
+const E = (cx, cy, rx, ry, n = 36) => Array.from({ length: n }, (_, i) => [cx + Math.cos(i / n * TAU) * rx, cy + Math.sin(i / n * TAU) * ry]);
+function hatch(pts, col, { dist = 6, angle = 45, cross = null, w = 1, kind = 'cpencil', rand = 0.12 } = {}) {
+  brush.noStroke(); brush.noFill(); brush.setHatch(kind, col, w);
+  brush.hatch(dist, angle, { rand, continuous: true, gradient: 0 }); brush.polygon(pts);
+  if (cross !== null) { brush.hatch(dist * 1.3, cross, { rand, continuous: true, gradient: 0 }); brush.polygon(pts); }
+  brush.noHatch();
+}
+function ln(pts, col, w = 1, kind = '2B') { brush.noHatch(); brush.set(kind, col, w); for (let i = 0; i < pts.length - 1; i++) brush.line(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1]); brush.noStroke(); }
+function lp(pts, col, w = 1, kind = '2B') { ln(pts.concat([pts[0]]), col, w, kind); }   // 注意：不能命名为 line/loop，会覆盖 p5 全局函数（p5.brush 会调用它们）
+function ring(x, y, r, col, w = 1, kind = 'cpencil') { brush.noHatch(); brush.set(kind, col, w); brush.circle(x, y, r, true); brush.noStroke(); }
+const P = (xp, yp) => [xp / 100 * W, yp / 100 * H];
+// 小螃蟹：按分镜构图记法（朝向·高度%·(x,y)）放置
+const FACE = { 正: 'front', 背: 'back', 侧右: 'right', 侧左: 'left' };
+function crab(face, hp, xp, yp, o = {}) {
+  const size = hp / 100 * H / 176 * (o.sit ? 1.15 : 1);
+  Crab.draw(Object.assign({ x: xp / 100 * W, y: yp / 100 * H + 89 * size, size, facing: FACE[face] }, o));
+  return size;
+}
+function lantern(xp, yp, size, lit = true) {
+  const [x, y] = P(xp, yp);
+  if (lit) { hatch(E(x, y, 46 * size, 46 * size), '#ffd98a', { dist: 5, angle: 60, w: 0.8 }); hatch(E(x, y, 30 * size, 30 * size), '#fff0c0', { dist: 4, angle: 120, w: 0.8 }); }
+  Crab.drawProp(lit ? 'lantern' : 'lantern_off', x, y, size);
+}
+function motion(pts, col = '#9fb6e0') { ln(pts, col, 0.6, 'HB'); }
+
+// ───────── 场景积木 ─────────
+const NIGHT = { wall: '#26306a', wall2: '#1b2252', floor: '#4a3a55', seam: '#2b2133' };
+const DAY = { wall: '#7a4a6e', wall2: '#d9784e', floor: '#8a5a52', seam: '#5a3a40' };
+function room(p = NIGHT, floorY = 780) {
+  hatch(R(0, 0, W, floorY), p.wall, { dist: 6, angle: 30, cross: 120, w: 1.1 });
+  hatch(R(0, floorY, W, H - floorY), p.floor, { dist: 6, angle: -15, cross: 80, w: 1.1 });
+  for (const y of [floorY + 50, floorY + 120, floorY + 210]) ln([[0, y], [W, y - 6]], p.seam, 0.8);
+}
+function warmGlow(x, y, rx, ry) {
+  hatch(E(x, y, rx, ry), '#d9784e', { dist: 7, angle: 70, w: 1 });
+  hatch(E(x, y, rx * 0.62, ry * 0.62), '#f4b456', { dist: 6, angle: 100, w: 1 });
+}
+function door(x, y, w, h, { open = 0, inside = '#1d2350', glow = false } = {}) {
+  if (open > 0) { hatch(R(x, y, w, h), inside, { dist: 5, angle: 90, cross: 0, w: 1 }); if (glow) hatch(E(x + w / 2, y + h * 0.75, w * 0.6, h * 0.3), '#ffd98a', { dist: 4, angle: 70, w: 0.9 }); }
+  else hatch(R(x, y, w, h), '#5a3f45', { dist: 5, angle: 85, w: 1 });
+  lp(R(x, y, w, h), '#151833', 2, 'charcoal');
+  if (open > 0) { const px = x + w; hatch([[px, y], [px + w * 0.35 * open, y - 30], [px + w * 0.35 * open, y + h + 30], [px, y + h]], '#5a3f45', { dist: 5, angle: 85 }); lp([[px, y], [px + w * 0.35 * open, y - 30], [px + w * 0.35 * open, y + h + 30], [px, y + h]], '#151833', 1.2, 'charcoal'); }
+  else hatch(E(x + w * 0.85, y + h * 0.5, 10, 10, 12), '#c9a070', { dist: 2, angle: 30 });
+}
+function nightSky(x, y, w, h, stars = 14, seed = 1) {
+  hatch(R(x, y, w, h), '#1f2758', { dist: 5, angle: 100, cross: 10, w: 1 });
+  randomSeed(seed); for (let i = 0; i < stars; i++) { const sx = x + random(w), sy = y + random(h * 0.7); ln([[sx - 6, sy], [sx + 6, sy]], '#f6eecf', 0.7, 'cpencil'); ln([[sx, sy - 6], [sx, sy + 6]], '#f6eecf', 0.7, 'cpencil'); }
+}
+function sunriseSky(x, y, w, h) {
+  const bands = [['#56609f', 0, 0.3], ['#c8707a', 0.25, 0.28], ['#ef9450', 0.48, 0.25], ['#ffd27a', 0.7, 0.3]];
+  for (const [c, a, b] of bands) hatch(R(x, y + h * a, w, h * b), c, { dist: 5, angle: 95, cross: 15, w: 1 });
+}
+function sea(y, col = '#24305e', y2 = H) { hatch(R(0, y, W, y2 - y), col, { dist: 6, angle: 0, cross: 170, w: 1 }); for (let k = 0; k < 6; k++) ln([[0, y + 30 + k * 40], [W, y + 26 + k * 40]], '#5d6fb0', 0.5, 'HB'); }
+function sand(y, col = '#4e4258') { hatch(R(0, y, W, H - y), col, { dist: 6, angle: -20, cross: 60, w: 1.1 }); }
+function sun(x, y, r) { hatch(E(x, y, r * 2, r * 2), '#ffd98a', { dist: 6, angle: 70, w: 0.9 }); hatch(E(x, y, r, r), '#fff2c4', { dist: 3, angle: 30, cross: 120, w: 1.1 }); ring(x, y, r, '#f6a84a', 1.2); }
+function windowFrame(x, y, w, h, sky = 'night', open = false) {
+  if (sky === 'night') nightSky(x, y, w, h, 8, 3); else if (sky === 'dark') hatch(R(x, y, w, h), '#141a3c', { dist: 4, angle: 90, cross: 0, w: 1.1 }); else { sunriseSky(x, y, w, h); sun(x + w * 0.6, y + h * 0.78, 50); }
+  lp(R(x, y, w, h), '#151833', 2.2, 'charcoal'); ln([[x + w / 2, y], [x + w / 2, y + h]], '#151833', 1.6, 'charcoal'); ln([[x, y + h * 0.45], [x + w, y + h * 0.45]], '#151833', 1.6, 'charcoal');
+  ln([[x - 20, y + h + 14], [x + w + 20, y + h + 14]], '#151833', 2.2, 'charcoal');
+  if (open) { const pane = [[x + w, y], [x + w + w * 0.28, y - 40], [x + w + w * 0.28, y + h + 40], [x + w, y + h]]; hatch(pane, sky === 'sunrise' ? '#e0955a' : '#3a4a80', { dist: 5, angle: 85 }); lp(pane, '#151833', 1.4, 'charcoal'); }
+}
+function table(x, y, w) { hatch(R(x, y, w, 26), '#6b4a3a', { dist: 4, angle: 10 }); ln([[x + 20, y + 26], [x + 20, y + 200]], '#3a2a2a', 1.6, 'charcoal'); ln([[x + w - 20, y + 26], [x + w - 20, y + 200]], '#3a2a2a', 1.6, 'charcoal'); }
+function beam(pts, col = '#ffe1a0', dist = 18) { hatch(pts, col, { dist, angle: 105, w: 0.6, rand: 0.3 }); }
+function lighthouse(x, y) { hatch([[x - 22, y], [x + 22, y], [x + 12, y - 150], [x - 12, y - 150]], '#d9d2c4', { dist: 3, angle: 0 }); hatch(R(x - 16, y - 175, 32, 25), '#ffd36e', { dist: 2.5, angle: 45 }); lp([[x - 22, y], [x + 22, y], [x + 12, y - 150], [x - 12, y - 150]], '#151833', 0.8); }
+function moon(x, y, r) { hatch(E(x, y, r, r), '#f6eecf', { dist: 3, angle: 40, cross: 130 }); ring(x, y, r, '#c9c0a0', 0.8); }
+function post(x, y, h) { hatch(R(x - 18, y - h, 36, h), '#6b4a3a', { dist: 4, angle: 80 }); lp(R(x - 18, y - h, 36, h), '#2a1a1a', 0.8); }
+
+// ───────── 54 个镜头的关键帧 ─────────
+const SHOTS = {
+  S01() { room(); door(1560, 300, 220, 480); crab('正', 22, 32, 70, { expression: 'sad', pose: 'chest' }); for (const k of [0, 1, 2]) motion([[470 + k * 14, 600], [480 + k * 14, 620], [470 + k * 14, 640]]); },
+  S02() { room(); door(1560, 300, 220, 480, { open: 1, inside: '#1f2758' }); nightSky(1560, 300, 220, 300, 5, 2); lantern(55, 76, 2.4); Crab.drawProp('letter', ...P(42, 80), 2.2); crab('正', 22, 32, 70, { expression: 'neutral', pose: 'chest' }); motion([[1700, 820], [1300, 830], [1120, 822]], '#ffd98a'); },
+  L01() { room(); warmGlow(1650, 880, 260, 180); lantern(86, 82, 3.4); Crab.drawProp('letter', ...P(25, 82), 2.6); crab('正', 42, 38, 60, { expression: 'shy', pose: 'sweep' }); },
+  L02() { room(); door(1520, 120, 260, 520); for (let k = 0; k < 6; k++) { const a = k / 6 * TAU; hatch(E(960 + Math.cos(a) * 520, 520 + Math.sin(a) * 260, 40, 26), '#ffd98a', { dist: 4, angle: 60 }); } ln(E(960, 520, 520, 260, 40), '#ffd98a', 0.5, 'HB'); lantern(50, 66, 4.2); motion([[880, 860], [960, 900], [1060, 860]], '#ffd98a'); },
+  L03() { nightSky(0, 0, W, 560, 20, 4); sea(560, '#24305e', 700); sand(700); hatch(R(1420, 220, 500, 560), '#5a3f45', { dist: 5, angle: 85, w: 1 }); door(1560, 470, 160, 310, { open: 1, inside: '#2a2a50', glow: true }); post(864, 790, 160); ln(E(900, 800, 260, 60, 30), '#c9b8a0', 0.6, 'HB'); crab('正', 18, 60, 70, { action: 'walk', t: 0.3 }); },
+  L04() { nightSky(0, 0, W, 420, 12, 5); sea(420, '#24305e', 560); sand(560); hatch(E(1152, 940, 470, 150), '#3a4a80', { dist: 4, angle: 0, cross: 170 }); const s = crab('正', 40, 60, 50); Crab.draw({ x: 1152, y: 540 + 89 * s + 6, size: s, facing: 'front', flipY: true, clip: [690, 800, 1620, 1080] }); hatch(E(1152, 940, 470, 150), '#2e3c72', { dist: 4, angle: 0, w: 0.9 }); for (let k = 0; k < 5; k++) ln([[760, 830 + k * 45], [1540, 826 + k * 45]], '#9fb6e0', 0.6, 'HB'); },
+  L05() { room(); door(120, 220, 260, 560); motion([[400, 300], [430, 330]]); motion([[400, 420], [430, 450]]); crab('正', 40, 60, 50, { expression: 'sad', action: 'hug', prop: 'lantern' }); },
+  L06() { room(); crab('正', 40, 60, 50, { expression: 'sad', action: 'hug', prop: 'lantern', pose: 'knock' }); motion([[1180, 210], [1210, 190]], '#f6eecf'); motion([[1200, 240], [1236, 230]], '#f6eecf'); },
+  L07() { room(); crab('正', 40, 60, 50, { expression: 'shy', pose: 'chest' }); lantern(60, 74, 3.0); motion([[1000, 600], [1080, 640]], '#f6eecf'); },
+  L08() { room(); crab('正', 40, 60, 50, { expression: 'sad', action: 'push' }); lantern(60, 92, 3.6); for (const dx of [-60, 0, 60]) motion([[1152 + dx, 860], [1152 + dx, 1040]], '#ffd98a'); hatch(R(0, 0, 120, H), '#5a3f45', { dist: 5, angle: 85 }); },
+  L09() { hatch(R(0, 0, W, 760), '#2a2440', { dist: 5, angle: 85, cross: 0, w: 1.1 }); hatch(R(0, 760, W, 320), '#3a2e48', { dist: 6, angle: -10, w: 1 }); beam([[700, 760], [1220, 760], [1500, 1080], [420, 1080]], '#ffd98a', 10); hatch(R(0, 744, W, 16), '#ffe9b0', { dist: 2, angle: 0 }); Crab.drawProp('letter', ...P(50, 84), 6); },
+  L10() { hatch(R(0, 0, W, H), '#3a2e48', { dist: 6, angle: -10, w: 1 }); beam([[300, 0], [1300, 0], [1700, H], [700, H]], '#ffd98a', 9); Crab.drawProp('letter', ...P(50, 58), 14); hatch(E(1010, 520, 60, 40), '#8cc4e8', { dist: 3, angle: 30 }); const d = [[1010, 180], [1030, 230], [1022, 262], [998, 262], [990, 230]]; hatch(d, '#8cc4e8', { dist: 2, angle: 70 }); lp(d, '#4e7fa5', 0.6); },
+  L11() { room(); beam([[1920, 300], [1920, 700], [700, 760], [700, 520]], '#ffd98a', 10); crab('正', 55, 50, 58, { expression: 'neutral' }); motion([[1240, 200], [1400, 160]], '#ffd98a'); },
+  L12() { nightSky(0, 0, W, H, 16, 6); hatch(R(0, 820, W, 260), '#4a3a40', { dist: 6, angle: 0 }); lantern(50, 52, 13); for (const k of [0, 1, 2]) motion([[300, 300 + k * 120], [700, 330 + k * 120]], '#c9d4f0'); },
+  L13() { room(); door(660, 120, 600, 700, { open: 1, inside: '#ffd98a', glow: true }); beam([[660, 820], [1260, 820], [1500, 1080], [420, 1080]], '#ffe1a0', 12); crab('背', 45, 50, 62, { action: 'push' }); },
+  L14() { room(); door(660, 120, 600, 700, { open: 1, inside: '#ffd98a', glow: true }); crab('背', 45, 50, 62, { expression: 'sad' }); const [x, y] = [1015, 330]; ln([[x - 22, y], [x + 22, y]], '#ffffff', 1, 'cpencil'); ln([[x, y - 22], [x, y + 22]], '#ffffff', 1, 'cpencil'); hatch(E(x, y + 40, 8, 12), '#8cc4e8', { dist: 1.6, angle: 70 }); },
+  L15() { room(); door(660, 120, 600, 700, { open: 1, inside: '#ffd98a', glow: true }); crab('背', 45, 50, 62, { pose: 'open' }); },
+  L16() { nightSky(0, 0, W, 760, 16, 7); hatch(R(0, 760, W, 320), '#5a4a50', { dist: 6, angle: 0 }); lantern(64, 70, 2.2); crab('背', 38, 50, 64, { action: 'walk', t: 0.25 }); },
+  L17() { nightSky(0, 0, W, 760, 16, 7); hatch(R(0, 760, W, 320), '#5a4a50', { dist: 6, angle: 0 }); crab('背', 50, 50, 60, { action: 'hug', prop: 'lantern' }); },
+  L18() { room(); hatch(R(560, 140, 800, 700), '#1f2758', { dist: 5, angle: 100, cross: 10 }); nightSky(560, 140, 800, 520, 26, 8); sea(660, '#24305e', 760); hatch(R(560, 760, 800, 80), '#5a4a50', { dist: 5, angle: 0 }); lp(R(560, 140, 800, 700), '#151833', 2.6, 'charcoal'); lantern(55, 72, 1.3); crab('背', 15, 50, 70, { sit: true }); },
+  I01() { room(); nightSky(560, 140, 800, 520, 26, 8); sea(660, '#24305e', 760); hatch(R(560, 760, 800, 80), '#5a4a50', { dist: 5, angle: 0 }); lp(R(560, 140, 800, 700), '#151833', 2.6, 'charcoal'); for (let k = 0; k < 6; k++) moon(640 + k * 120, 300 - Math.sin(k / 5 * PI) * 110, k === 5 ? 36 : 14); lantern(55, 72, 1.3); crab('背', 15, 50, 70, { sit: true, expression: 'sleepy' }); },
+  I02() { room(); hatch(R(0, 0, W, H), '#141a3c', { dist: 9, angle: 45, w: 0.8 }); lantern(50, 55, 10, true); hatch(E(960, 520, 90, 90), '#141a3c', { dist: 4, angle: 30 }); crab('背', 60, 6, 70, { sit: true }); },
+  L19() { hatch(R(0, 0, W, 560), '#171b3d', { dist: 5, angle: 100, cross: 10 }); sea(560, '#1c254e', 700); sand(700, '#4a3e52'); for (let k = 0; k < 8; k++) motion([[1900, 120 + k * 110], [1300, 140 + k * 110]], '#8a94c0'); crab('侧右', 28, 45, 66, { action: 'hold', prop: 'lantern_off', expression: 'sad' }); },
+  L20() { hatch(R(0, 0, W, 560), '#171b3d', { dist: 5, angle: 100, cross: 10 }); sea(560, '#1c254e', 700); sand(700, '#4a3e52'); hatch([[100, 760], [600, 520], [760, 760]], '#3a3044', { dist: 5, angle: 60 }); Crab.drawProp('lantern_off', ...P(62, 70), 3.2); crab('侧右', 28, 45, 66, { expression: 'sad', clip: [0, 0, W, 672] }); hatch(E(864, 712, 260, 70), '#5a4c60', { dist: 4, angle: -20, cross: 60 }); },
+  L21() { hatch(R(0, 0, W, 560), '#171b3d', { dist: 5, angle: 100, cross: 10 }); sea(560, '#1c254e', 700); sand(700, '#4a3e52'); lighthouse(1700, 560); beam([[1700, 395], [600, 430], [600, 520]], '#ffe1a0', 10); Crab.drawProp('lantern_off', ...P(62, 70), 3.2); crab('侧右', 28, 45, 66, { expression: 'neutral', clip: [0, 0, W, 672] }); hatch(E(864, 712, 260, 70), '#5a4c60', { dist: 4, angle: -20, cross: 60 }); },
+  L22() { hatch(R(0, 0, W, 560), '#171b3d', { dist: 5, angle: 100, cross: 10 }); sea(560, '#1c254e', 760); sand(760, '#4a3e52'); Crab.drawProp('lantern_off', ...P(80, 70), 2.6); crab('侧右', 28, 45, 66, { expression: 'sad', action: 'push', clip: [0, 0, W, 700] }); hatch(E(864, 740, 280, 80), '#5a4c60', { dist: 4, angle: -20, cross: 60 }); motion([[1300, 760], [1500, 760]], '#c9d4f0'); },
+  L23() { hatch(R(0, 0, W, 520), '#141a3c', { dist: 5, angle: 100, cross: 10 }); sea(520, '#1c254e'); lantern(50, 60, 1.6); hatch(E(960, 648, 160, 40), '#ffd98a', { dist: 6, angle: 0 }); },
+  L24() { sand(0, '#5a4c60'); ln([[200, 1080], [700, 600], [1100, 400], [1180, 330]], '#3a3044', 3, 'charcoal'); ln([[240, 1080], [730, 610], [1120, 410], [1190, 340]], '#3a3044', 3, 'charcoal'); hatch([[1100, 0], [1920, 0], [1920, 520], [1300, 360], [1180, 200]], '#2e3a6a', { dist: 5, angle: 0, cross: 170 }); ln([[1180, 200], [1300, 360], [1920, 520]], '#e8eef8', 1.4, 'cpencil'); },
+  L25() { hatch(R(0, 0, W, 420), '#1f2350', { dist: 5, angle: 100 }); sea(420, '#1c254e', 560); sand(560, '#4a3e52'); beam([[1920, 300], [1920, 520], [760, 600], [760, 460]], '#ffd98a', 9); crab('正', 40, 40, 60, { expression: 'neutral', pose: 'chest', clip: [0, 0, W, 545] }); hatch(E(768, 600, 320, 70), '#5a4c60', { dist: 4, angle: -20, cross: 60 }); },
+  L26() { hatch(R(0, 0, W, 480), '#2a2a60', { dist: 5, angle: 100 }); sea(480, '#1c254e'); lantern(50, 58, 3.4); hatch([[300, 760], [700, 520], [1100, 560], [900, 760]], '#c9d8ee', { dist: 4, angle: 30 }); ln([[300, 760], [700, 520], [1100, 560]], '#ffffff', 1.2, 'cpencil'); },
+  L27() { hatch(R(0, 0, W, 300), '#3b3a7a', { dist: 5, angle: 100 }); hatch(R(0, 300, W, 200), '#7a4f8a', { dist: 5, angle: 95 }); sea(500, '#3a3f78'); lantern(58, 60, 1.8); crab('侧右', 22, 45, 64, { action: 'walk', t: 0.6, clip: [0, 0, W, 760] }); for (const k of [0, 1, 2]) motion([[700 - k * 60, 760], [760 - k * 60, 700]], '#e8eef8'); },
+  L28() { sea(0, '#3a3f78'); for (const r of [80, 180, 300, 440]) ring(960, 540, r, r < 200 ? '#ffe9b0' : '#a8b8e8', 1.2); hatch(E(960, 540, 60, 60), '#ffe9b0', { dist: 3, angle: 30 }); const d = [[960, 300], [980, 350], [972, 382], [948, 382], [940, 350]]; hatch(d, '#8cc4e8', { dist: 2, angle: 70 }); },
+  L29() { hatch(R(0, 0, W, 360), '#7a4f8a', { dist: 5, angle: 95 }); sea(360, '#3a3f78'); lantern(66, 62, 3.2); crab('正', 40, 50, 55, { expression: 'neutral', clip: [0, 0, W, 820] }); hatch([[1920, 200], [1500, 380], [1400, 700], [1920, 820]], '#c9d8ee', { dist: 4, angle: 60, cross: 150 }); ln([[1920, 200], [1500, 380], [1400, 700]], '#ffffff', 1.4, 'cpencil'); },
+  L30() { hatch(R(0, 0, W, 360), '#7a4f8a', { dist: 5, angle: 95 }); sea(360, '#3a3f78'); crab('正', 40, 50, 55, { expression: 'happy', action: 'hold', prop: 'lantern', clip: [0, 0, W, 820] }); },
+  L31() { hatch(R(0, 0, W, 360), '#8a5a8a', { dist: 5, angle: 95 }); sea(360, '#3a3f78'); hatch([[1180, 420], [1300, 420], [1800, 1080], [600, 1080]], '#ffd98a', { dist: 7, angle: 0, w: 0.9, rand: 0.25 }); hatch(E(1240, 380, 260, 40), '#ffe9b0', { dist: 6, angle: 0, w: 0.8 }); crab('正', 40, 50, 58, { expression: 'happy', action: 'hold', prop: 'lantern', pose: 'raise', clip: [0, 0, W, 840] }); },
+  L32() { hatch(R(0, 0, W, 300), '#8a5a8a', { dist: 5, angle: 95 }); hatch(R(0, 300, W, 160), '#c8707a', { dist: 5, angle: 95 }); sea(460, '#3a3f78', 640); sand(640, '#6a5468'); for (let k = 0; k < 8; k++) hatch(E(1200 + k * 90, 900 + (k % 2) * 20, 10, 6), '#3a3044', { dist: 2, angle: 0 }); crab('正', 40, 50, 58, { expression: 'happy', action: 'hold', prop: 'lantern', pose: 'raise' }); motion([[700, 640], [520, 640]], '#f6eecf'); },
+  L33() { room({ ...NIGHT, wall: '#1f2658' }); table(1240, 560, 300); lantern(70, 50, 3.0); crab('正', 30, 40, 64, { expression: 'sad', action: 'walk', t: 0.7 }); motion([[620, 560], [440, 560]], '#f6eecf'); },
+  L34() { hatch(R(0, 0, W, H), '#3a4070', { dist: 6, angle: 30, w: 1 }); hatch(R(80, 60, 1760, 960), '#c9d0e0', { dist: 4, angle: 20, cross: 110, w: 0.9 }); lp(R(80, 60, 1760, 960), '#151833', 3, 'charcoal'); const hx = 1400, hy = 520; ln([[hx, hy + 120], [hx - 150, hy - 20], [hx - 90, hy - 110], [hx, hy - 40], [hx + 90, hy - 110], [hx + 150, hy - 20], [hx, hy + 120]], '#6a7aa8', 1.6, 'cpencil'); ln([[hx - 190, hy + 140], [hx + 190, hy - 160]], '#4a5a88', 2, 'cpencil'); Crab.draw({ x: 2200, y: 1300, size: 4, facing: 'left', pose: 'press', shadow: false }); },
+  L35() { room({ ...NIGHT, wall: '#1f2658' }); windowFrame(660, 120, 600, 460, 'dark'); hatch([[860, 560], [1060, 560], [1120, 200], [800, 200]], '#0e1230', { dist: 4, angle: 80 }); hatch(R(0, 900, W, 180), '#f4b456', { dist: 9, angle: 100, w: 0.8 }); crab('背', 35, 50, 60, { expression: 'sad' }); },
+  L36() { hatch(R(0, 0, W, H), '#141a3c', { dist: 5, angle: 90, cross: 0, w: 1.1 }); lp(R(160, 40, 1600, 1000), '#0a0d24', 4, 'charcoal'); Crab.draw({ x: 1340, y: 470, size: 2.0, facing: 'front', expression: 'sleepy', shadow: false }); hatch(R(1000, 60, 700, 420), '#141a3c', { dist: 13, angle: 60, w: 0.5 }); crab('背', 55, 50, 58, {}); },
+  L37() { hatch(R(0, 0, W, H), '#1f2658', { dist: 6, angle: 30, w: 1 }); hatch(R(560, 60, 800, 700), '#f2c48a', { dist: 6, angle: 95, w: 1 }); hatch([[560, 60], [300, 0], [300, 840], [560, 760]], '#3a4a80', { dist: 5, angle: 85 }); hatch([[1360, 60], [1620, 0], [1620, 840], [1360, 760]], '#3a4a80', { dist: 5, angle: 85 }); lp(R(560, 60, 800, 700), '#151833', 2.6, 'charcoal'); crab('背', 55, 50, 58, { action: 'push' }); for (const k of [0, 1]) motion([[520 - k * 30, 400], [380 - k * 30, 380]], '#ffd98a'); },
+  L38() { hatch(R(0, 0, W, H), '#6e4470', { dist: 6, angle: 30, cross: 120, w: 1 }); warmGlow(1100, 420, 700, 520); windowFrame(720, 120, 560, 520, 'sunrise', true); hatch(E(1267, 432, 70, 70), '#fff2c4', { dist: 3, angle: 40 }); crab('背', 25, 50, 64, {}); hatch(R(0, 820, W, 260), '#8a5a52', { dist: 6, angle: -15, w: 1 }); },
+  L39() { room(DAY); warmGlow(400, 300, 600, 400); beam([[200, 0], [700, 0], [1200, 1080], [500, 1080]], '#ffd98a', 8); Crab.drawProp('letter', ...P(50, 62), 5.2); },
+  L40() { room(DAY); beam([[600, 0], [1100, 0], [1300, 1080], [600, 1080]], '#ffd98a', 9); crab('正', 45, 50, 40, { expression: 'shy', pose: 'chest' }); Crab.drawProp('letter_open', ...P(50, 66), 6.5); },
+  L41() { hatch(R(0, 0, W, H), '#c4844f', { dist: 7, angle: 30, w: 1 }); Crab.drawProp('drawing', 960, 560, 15); },
+  L42() { sunriseSky(0, 0, W, 760); sun(1300, 640, 80); hatch(R(0, 760, W, 320), '#8a5a52', { dist: 6, angle: 0 }); lantern(60, 50, 9); for (const k of [0, 1]) motion([[1000 + k * 30, 260], [1060 + k * 30, 220]], '#fff2c4'); },
+  L43() { hatch(R(0, 0, W, H), '#6e4470', { dist: 6, angle: 30, w: 1 }); windowFrame(300, 60, 1320, 700, 'sunrise', true); hatch(R(200, 760, 1520, 60), '#8a5a52', { dist: 4, angle: 0 }); lantern(66, 66, 2.6); crab('背', 30, 45, 60, { action: 'walk', t: 0.5 }); },
+  L44() { hatch(R(0, 0, W, H), '#6e4470', { dist: 6, angle: 30, w: 1 }); windowFrame(300, 60, 1100, 700, 'sunrise', false); const pane = [[1400, 60], [1800, 0], [1800, 900], [1400, 760]]; hatch(pane, '#e8b08a', { dist: 5, angle: 85 }); lp(pane, '#151833', 2, 'charcoal'); Crab.draw({ x: 1380 + 0.14 * W, y: 0.48 * H + 89 * 1.1, size: 1.1, facing: 'front', expression: 'teary-happy', shadow: false }); hatch(pane, '#e8b08a', { dist: 10, angle: 60, w: 0.6 }); lantern(66, 66, 2.6); crab('背', 30, 45, 60, {}); },
+  L45() { hatch(R(0, 0, W, H), '#6e4470', { dist: 6, angle: 30, w: 1 }); windowFrame(300, 60, 1320, 700, 'sunrise', true); hatch(R(200, 760, 1520, 60), '#8a5a52', { dist: 4, angle: 0 }); lantern(66, 66, 2.6); crab('背', 30, 45, 60, { pose: 'open' }); },
+  L46() { hatch(R(0, 0, W, H), '#6e4470', { dist: 6, angle: 30, w: 1 }); windowFrame(300, 60, 1320, 700, 'sunrise', true); hatch(R(200, 760, 1520, 60), '#8a5a52', { dist: 4, angle: 0 }); crab('背', 30, 50, 60, { action: 'hug', prop: 'lantern' }); },
+  L47() { room(DAY); warmGlow(960, 420, 700, 420); windowFrame(560, 140, 800, 560, 'sunrise', true); lantern(54, 63, 1.1); crab('背', 12, 50, 64, { sit: true }); },
+  O01() { room(DAY); warmGlow(960, 420, 700, 420); windowFrame(560, 140, 800, 560, 'sunrise', true); Crab.drawProp('drawing', ...P(64, 46), 3.2); hatch(E(1229, 497, 120, 90), '#fff2c4', { dist: 6, angle: 60, w: 0.7 }); lantern(54, 63, 1.1); crab('背', 12, 50, 64, { sit: true, pose: 'press' }); },
+  L48() { sunriseSky(0, 0, W, 620); sun(1300, 560, 90); sea(620, '#5a4a8a'); hatch([[1240, 630], [1360, 630], [1640, 1000], [960, 1000]], '#ffd98a', { dist: 7, angle: 0, w: 0.9, rand: 0.25 }); ln([[1040, 900], [1300, 640]], '#ffe9b0', 1.2, 'cpencil'); hatch(R(0, 990, W, 90), '#8a5a52', { dist: 5, angle: 0 }); crab('背', 10, 50, 89, { sit: true, action: 'hold', prop: 'lantern', pose: 'raise' }); },
+  O02() { room({ wall: '#8a5a6e', wall2: '#d9784e', floor: '#a0705a', seam: '#6a4a40' }); warmGlow(1660, 540, 500, 420); door(1560, 300, 220, 480, { open: 1, inside: '#ffd27a' }); hatch(R(1560, 600, 220, 180), '#c9a070', { dist: 4, angle: 0 }); windowFrame(700, 160, 380, 300, 'sunrise', false); Crab.drawProp('drawing', 890, 300, 2.2); for (let k = 0; k < 7; k++) hatch(E(1200 + k * 55, 900 - k * 18, 8, 5), '#6a4a40', { dist: 1.6, angle: 0 }); crab('正', 4, 86, 70, { expression: 'happy', action: 'hold', prop: 'lantern', pose: 'raise' }); },
+};
+const ORDER = Object.keys(SHOTS);
+
+function setup() {
+  createCanvas(W, H, WEBGL); pixelDensity(1);
+  paperG = createGraphics(W, H); paperG.pixelDensity(1); paperG.loadPixels(); noiseSeed(4); randomSeed(4);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const n = noise(x * 0.004, y * 0.004) * 14 + noise(x * 0.08, y * 0.08) * 10 + random(-5, 5); paperG.pixels.set([228 + n, 221 + n, 204 + n, 255], (y * W + x) * 4); }
+  paperG.updatePixels();
+  toothG = createGraphics(W, H); toothG.pixelDensity(1); toothG.noStroke(); randomSeed(9);
+  for (let i = 0; i < 90000; i++) { const x = random(W), y = random(H), n = noise(x * 0.06, y * 0.06); if (n > 0.55) { toothG.fill(240, 234, 220, 70 + (n - 0.55) * 300); toothG.ellipse(x, y, random(1, 2.6), random(1, 2.2)); } }
+  noLoop();
+}
+function draw() {
+  if (!CUR) return;
+  translate(-width / 2, -height / 2);
+  if (PHASE === 0) { image(paperG, 0, 0); brush.seed(ORDER.indexOf(CUR) + 11); randomSeed(ORDER.indexOf(CUR) + 11); SHOTS[CUR](); }
+  else image(toothG, 0, 0);
+}
+async function renderShot(id) {
+  CUR = id; PHASE = 0; redraw(); await new Promise(r => setTimeout(r, 30)); PHASE = 1; redraw(); await new Promise(r => setTimeout(r, 30));
+  const blob = await new Promise(r => document.querySelector('canvas.p5Canvas').toBlob(r, 'image/png'));
+  return (await fetch('/save?name=storyboard/' + id + '.png', { method: 'POST', body: blob })).text();
+}
+window.progress = [];
+window.exportAll = async (ids = ORDER) => { for (const id of ids) { const t0 = performance.now(); try { await renderShot(id); window.progress.push([id, Math.round(performance.now() - t0)]); } catch (e) { window.progress.push([id, 'ERR ' + e.message]); } } window.progress.push(['DONE']); };
+</script>
+</body>
+</html>

@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>逆光 · 开场 · 蜡笔手绘绘本</title>
+<style>
+  html,body{margin:0;height:100%;background:#222;display:flex;align-items:center;justify-content:center}
+  canvas{max-width:100vw!important;max-height:100vh!important;width:auto!important;height:auto!important}
+</style>
+<script src="lib/p5.min.js"></script>
+<script src="lib/p5.brush.js"></script>
+</head>
+<body>
+<script>
+// ───── 规格：p5.js + p5.brush 笔刷（cpencil / charcoal / 2B / HB）排线与描线；保留笔触与纸张纹理 ─────
+const CW = 1920, CH = 1080;
+let paperG, toothG, step = 0;
+window.done = false;
+
+function makePaper() {                       // 米白绘本纸：低频斑驳 + 高频纸纹
+  const g = createGraphics(CW, CH); g.pixelDensity(1); g.loadPixels();
+  noiseSeed(4); randomSeed(4);
+  for (let y = 0; y < CH; y++) for (let x = 0; x < CW; x++) {
+    const n = noise(x * 0.004, y * 0.004) * 14 + noise(x * 0.08, y * 0.08) * 10 + random(-5, 5);
+    const i = (y * CW + x) * 4;
+    g.pixels[i] = 236 - 8 + n; g.pixels[i + 1] = 229 - 8 + n; g.pixels[i + 2] = 212 - 8 + n; g.pixels[i + 3] = 255;
+  }
+  g.updatePixels(); return g;
+}
+function makeTooth() {                       // 纸面凸点：蜡笔跳笔露出的纸白
+  const g = createGraphics(CW, CH); g.pixelDensity(1); g.noStroke();
+  randomSeed(9);
+  for (let i = 0; i < 90000; i++) {
+    const x = random(CW), y = random(CH), n = noise(x * 0.06, y * 0.06);
+    if (n > 0.55) { g.fill(240, 234, 220, 70 + (n - 0.55) * 300); g.ellipse(x, y, random(1, 2.6), random(1, 2.2)); }
+  }
+  return g;
+}
+
+function setup() {
+  createCanvas(CW, CH, WEBGL); pixelDensity(1);
+  paperG = makePaper(); toothG = makeTooth();
+  brush.seed(2024); randomSeed(2024);
+  noLoop();   // 由 redraw() 逐帧推进（页面隐藏时 rAF 不触发）
+}
+
+// 用蜡笔排线填一块形状（可叠两层不同角度）
+function crayonFill(pts, col, { dist = 7, angle = 45, weight = 1, kind = 'cpencil', rand = 0.15, grad = 0, cross = null, cont = true } = {}) {
+  brush.noStroke(); brush.noFill();
+  brush.setHatch(kind, col, weight);
+  const d = dist;   // 注意：p5.brush 的 gradient 会让每条线间距按倍数累乘，大面积排线必须用 0
+  brush.hatch(d, angle, { rand, continuous: cont, gradient: grad });
+  brush.polygon(pts);
+  if (cross !== null) { brush.hatch(d * 1.3, cross, { rand, continuous: cont, gradient: grad }); brush.polygon(pts); }
+  brush.noHatch();
+}
+function crayonLine(pts, col, weight = 1, kind = '2B') {
+  brush.set(kind, col, weight);
+  for (let i = 0; i < pts.length - 1; i++) brush.line(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1]);
+  brush.noStroke();
+}
+const rectP = (x, y, w, h) => [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
+const ellP = (cx, cy, rx, ry, n = 40) => Array.from({ length: n }, (_, i) => [cx + Math.cos(i / n * TAU) * rx, cy + Math.sin(i / n * TAU) * ry]);
+
+// Sutherland–Hodgman：把多边形裁到矩形内（用来让墙面排线避开窗洞）
+function clipRect(poly, x0, y0, x1, y1) {
+  const edges = [[p => p[0] >= x0, (a, b) => [x0, a[1] + (b[1] - a[1]) * (x0 - a[0]) / (b[0] - a[0])]],
+                 [p => p[0] <= x1, (a, b) => [x1, a[1] + (b[1] - a[1]) * (x1 - a[0]) / (b[0] - a[0])]],
+                 [p => p[1] >= y0, (a, b) => [a[0] + (b[0] - a[0]) * (y0 - a[1]) / (b[1] - a[1]), y0]],
+                 [p => p[1] <= y1, (a, b) => [a[0] + (b[0] - a[0]) * (y1 - a[1]) / (b[1] - a[1]), y1]]];
+  let out = poly;
+  for (const [inside, cut] of edges) {
+    const inp = out; out = [];
+    for (let i = 0; i < inp.length; i++) {
+      const a = inp[(i + inp.length - 1) % inp.length], b = inp[i];
+      if (inside(b)) { if (!inside(a)) out.push(cut(a, b)); out.push(b); } else if (inside(a)) out.push(cut(a, b));
+    }
+    if (!out.length) break;
+  }
+  return out;
+}
+const WALL_PARTS = [[0, 0, 1206, 770], [1518, 0, CW, 770], [1206, 0, 1518, 140], [1206, 724, 1518, 770]];
+function wallFill(poly, col, opts) { for (const r of WALL_PARTS) { const c = clipRect(poly, ...r); if (c.length >= 3) crayonFill(c, col, opts); } }
+
+function curtainPts(ph) {
+  const left = [], right = [];
+  for (let yp = 23; yp <= 122; yp += 4) {
+    const k = (yp - 23) / 99;
+    left.push([(205 - k * 30 - 7 * Math.sin(yp / 11 + ph) * k) * 6, yp * 6]);
+    right.push([(214 - k * 6 + 2 * Math.sin(yp / 8 + ph)) * 6, yp * 6]);
+  }
+  return left.concat(right.reverse());
+}
+
+function drawScene() {
+  translate(-width / 2, -height / 2);
+  image(paperG, 0, 0);
+
+  // 墙：深靛蓝两向排线；靠窗一圈只用浅蓝稀疏排线，让纸白透出来当作“光晕”
+  wallFill(rectP(0, 0, CW, 770), '#26306a', { dist: 5, angle: 30, cross: 120, weight: 1.1 });
+  wallFill(ellP(1362, 430, 560, 440), '#6e4470', { dist: 6, angle: 60, weight: 1 });
+  wallFill(ellP(1362, 440, 370, 350), '#d9784e', { dist: 6, angle: 75, weight: 1 });
+  wallFill(ellP(1362, 480, 240, 260), '#f4b456', { dist: 5, angle: 95, weight: 1 });
+  // 墙上空画框
+  crayonFill(rectP(560, 296, 168, 156), '#1b2150', { dist: 6, angle: 10 });
+  crayonLine([[548, 284], [740, 284], [740, 464], [548, 464], [548, 284]], '#12152e', 1.4, 'charcoal');
+
+  // 地板：紫棕排线 + 2B 铅笔板缝
+  crayonFill(rectP(0, 770, CW, 310), '#4a3a55', { dist: 6, angle: -15, cross: 80, weight: 1.1 });
+  for (const y of [812, 858, 916, 990]) crayonLine([[0, y], [CW, y - 6]], '#2b2133', 0.9, '2B');
+
+  // 地上的窗形光斑：白色蜡笔压在深色上
+  crayonFill([[1224, 772], [1500, 772], [1572, 1080], [900, 1080]], '#f8d27c', { dist: 4, angle: 70, cross: 160, weight: 1.2 });
+  crayonLine([[1362, 772], [1240, 1080]], '#5a4a66', 1.6, 'charcoal');
+  crayonLine([[960, 902], [1540, 902]], '#5a4a66', 1.6, 'charcoal');
+
+  // 窗外：纸白 + 浅冷蓝；月亮只勾一圈，留纸白
+  // 日出天空：四层重叠的色带排线叠出金黄渐变
+  crayonFill(rectP(1224, 156, 276, 170), '#56609f', { dist: 5, angle: 100, cross: 20, weight: 0.9 });
+  crayonFill(rectP(1224, 290, 276, 160), '#c8707a', { dist: 5, angle: 95, cross: 15, weight: 0.9 });
+  crayonFill(rectP(1224, 420, 276, 150), '#ef9450', { dist: 5, angle: 100, cross: 20, weight: 1 });
+  crayonFill(rectP(1224, 540, 276, 168), '#ffd27a', { dist: 4, angle: 95, cross: 15, weight: 1 });
+  crayonFill(ellP(1392, 604, 62, 62), '#fff2c4', { dist: 3, angle: 30, cross: 120, weight: 1.1 });   // 太阳
+  crayonFill([[1224, 708], [1224, 624], [1260, 624], [1260, 600], [1296, 600], [1296, 636], [1332, 636], [1332, 582], [1374, 582], [1374, 618], [1410, 618], [1410, 648], [1446, 648], [1446, 606], [1500, 606], [1500, 708]], '#4a2f4f', { dist: 4, angle: 0, cross: 90, weight: 1.1 });
+  brush.set('cpencil', '#f6a84a', 1.2); brush.circle(1392, 604, 64, true); brush.noStroke();
+  // 窗框：炭笔粗线
+  const fr = '#151833';
+  crayonLine([[1214, 148], [1510, 148], [1510, 716], [1214, 716], [1214, 148]], fr, 2.2, 'charcoal');
+  crayonLine([[1362, 156], [1362, 708]], fr, 1.6, 'charcoal');
+  crayonLine([[1224, 384], [1500, 384]], fr, 1.6, 'charcoal');
+  crayonLine([[1196, 734], [1528, 734]], fr, 2.2, 'charcoal');
+  // 推开的右扇窗
+  crayonFill([[1520, 140], [1600, 104], [1600, 760], [1520, 724]], '#e0955a', { dist: 5, angle: 85 });
+  crayonLine([[1520, 140], [1600, 104], [1600, 760], [1520, 724], [1520, 140]], fr, 1.6, 'charcoal');
+  crayonLine([[1116, 128], [1596, 128]], fr, 2, 'charcoal');
+
+  // 窗帘：青色顺着布纹方向排线
+  crayonFill(curtainPts(0), '#4f8f99', { dist: 6, angle: 80, cross: 100, weight: 1 });
+  crayonFill(curtainPts(0.9).map(([x, y]) => [x + 24, y]), '#f5c27a', { dist: 6, angle: 75, weight: 1 });
+  crayonFill([[1512, 140], [1572, 140], [1584, 760], [1530, 762]], '#3e6a75', { dist: 6, angle: 88 });
+
+  // 一道光柱：白蜡笔极稀疏的长排线
+  crayonFill([[1224, 726], [1500, 726], [1596, 1060], [840, 1060]], '#ffe1a0', { dist: 22, angle: 105, weight: 0.6, rand: 0.4, cont: false });
+  // 从太阳散开的几道光束 + 散落的光斑
+  for (const [a, w] of [[2.0, 0.035], [2.25, 0.045], [2.55, 0.03], [1.75, 0.03], [2.85, 0.04]]) {
+    const sx = 1392, sy = 604, L = 1500;
+    crayonFill([[sx, sy], [sx + Math.cos(a - w) * L, sy + Math.sin(a - w) * L], [sx + Math.cos(a + w) * L, sy + Math.sin(a + w) * L]], '#ffd98a', { dist: 7, angle: -a * 180 / Math.PI, weight: 0.6, rand: 0.2, cont: false });
+  }
+  randomSeed(77);
+  for (let i = 0; i < 18; i++) { const x = random(120, 1820), y = random(180, 1040); if (x > 900 && x < 1110 && y > 620 && y < 980) continue;
+    crayonFill(ellP(x, y, random(7, 15), random(6, 11), 14), random() < 0.5 ? '#ffcf6a' : '#f5a85a', { dist: 3, angle: random(180), weight: 0.9 }); }
+
+  // 旧椅子：炭笔
+  const chair = [[[348, 624], [348, 1010]], [[468, 624], [468, 984]], [[336, 830], [498, 830]], [[336, 630], [480, 630]], [[408, 830], [404, 960]]];
+  for (const l of chair) crayonLine(l, '#14172f', 1.8, 'charcoal');
+
+  // 影子：拖向镜头
+  crayonFill([[966, 954], [1050, 954], [876, 1066], [660, 1066]], '#231a2b', { dist: 5, angle: 20, cross: 110, weight: 1.1 });
+
+  // 女孩：深色剪影（两向密排线 + 2B 描边），右缘一笔冷白轮廓光
+  const ink = '#191424';
+  const head = ellP(1008, 680, 33, 36);
+  const body = [[976, 672], [1040, 672], [1046, 740], [1058, 744], [1084, 766], [1096, 858], [1082, 862], [1070, 806], [1066, 840], [1082, 906], [934, 906], [950, 840], [946, 806], [934, 862], [920, 858], [932, 766], [958, 744], [970, 740]];
+  for (const p of [head, body, rectP(978, 904, 18, 50), rectP(1026, 904, 18, 50)]) crayonFill(p, ink, { dist: 3.5, angle: 60, cross: 150, weight: 1.2, kind: 'charcoal', rand: 0.05, grad: 0 });
+  crayonLine(body.concat([body[0]]), ink, 1, '2B');
+  crayonLine([[1040, 660], [1044, 700], [1048, 742]], '#ffd98a', 1.4, 'cpencil');
+  crayonLine([[1060, 748], [1084, 768], [1096, 856]], '#ffd98a', 1.4, 'cpencil');
+  crayonLine([[1068, 810], [1066, 842], [1082, 904]], '#ffd98a', 1.2, 'cpencil');
+  brush.set('cpencil', '#ffd98a', 1.3); brush.spline([[992, 648], [1016, 645], [1036, 656], [1042, 676]], 0.5); brush.noStroke();
+
+  // 围巾：珊瑚色蜡笔，尾巴被风扯向左
+  crayonFill([[962, 734], [1054, 734], [1058, 756], [958, 756]], '#c4625a', { dist: 4, angle: 10, weight: 1.2, kind: 'cpencil', grad: 0 });
+  crayonFill([[966, 736], [920, 728], [882, 738], [848, 728], [838, 750], [880, 758], [920, 750], [962, 756]], '#c4625a', { dist: 4, angle: 170, weight: 1.2, kind: 'cpencil', grad: 0 });
+  brush.set('cpencil', '#8e3d43', 1); brush.spline([[962, 754], [920, 750], [880, 757], [840, 750]], 0.5); brush.noStroke();
+
+  // 浮尘：白蜡笔小圈 + 被风卷进来的小纸片
+  randomSeed(5);
+  for (let i = 0; i < 12; i++) {
+    const yp = 40 + random(110), cx = 227 - (yp - 30) * 0.18, xp = cx + random(-0.5, 0.5) * (40 + (yp - 30) * 0.45);
+    brush.set('cpencil', '#ffe9b0', 1); brush.circle(xp * 6, yp * 6, random(3, 6), true); brush.noStroke();
+  }
+  for (const [x, y] of [[780, 900], [690, 846], [600, 960]]) crayonFill(rectP(x - 18, y - 9, 36, 18), '#d9d0bd', { dist: 3, angle: 30 });
+}
+
+function draw() {
+  if (step === 0) drawScene();
+  else if (step === 1) { translate(-width / 2, -height / 2); image(toothG, 0, 0); }   // 叠一层纸纹：蜡笔在凸点处“跳笔”
+  if (step >= 1) window.done = true;
+  step++;
+}
+
+window.exportPNG = async (name = '3_crayon.png') => {
+  while (!window.done) { redraw(); await new Promise(r => setTimeout(r, 50)); }
+  const cnv = document.querySelector('canvas');
+  const blob = await new Promise(r => cnv.toBlob(r, 'image/png'));
+  const res = await fetch('/save?name=' + name, { method: 'POST', body: blob });
+  return { status: await res.text(), size: [cnv.width, cnv.height] };
+};
+</script>
+</body>
+</html>
