@@ -1,0 +1,8 @@
+# 统一换行：文本文件在仓库里一律存为 LF，检出时由 git 按平台转换
+* text=auto
+
+# 二进制文件不做换行转换、不做文本 diff
+*.png binary
+*.jpg binary
+*.mp4 binary
+*.h264 binary
